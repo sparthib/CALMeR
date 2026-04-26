@@ -8,6 +8,8 @@
 #' \enumerate{
 #'   \item [extract_features()] — read BAM + GTF + transcriptome FASTA, build
 #'         per-read feature table.
+#'   \item [clean_features()] — apply standard pre-fit filters
+#'         (primary alignments, n_isoforms cap, GC range, length range).
 #'   \item [fit_beinf()] — fit BEINF regression on a sampled subset.
 #'   \item [score_reads()] — compute randomized quantile residuals on the full
 #'         feature table and flag reads.

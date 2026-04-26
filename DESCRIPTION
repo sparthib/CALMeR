@@ -25,6 +25,7 @@ Imports:
     GenomicAlignments,
     rtracklayer,
     Biostrings,
+    S4Vectors,
     gamlss,
     gamlss.dist,
     dplyr,

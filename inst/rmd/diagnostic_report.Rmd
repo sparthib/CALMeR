@@ -1,0 +1,326 @@
+---
+title: "CALMeR Diagnostic Report"
+date: "`r format(Sys.Date(), '%Y-%m-%d')`"
+output:
+  pdf_document:
+    toc: true
+    toc_depth: 2
+    fig_width: 8
+    fig_height: 5
+  html_document:
+    toc: true
+    toc_depth: 2
+    toc_float: true
+    fig_width: 8
+    fig_height: 5
+params:
+  fit: !r NULL
+  scored: !r NULL
+---
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(
+  echo       = FALSE,
+  warning    = FALSE,
+  message    = FALSE,
+  fig.align  = "center"
+)
+
+library(ggplot2)
+library(patchwork)
+library(dplyr)
+library(gamlss)
+
+fit          <- params$fit
+scored       <- params$scored
+training     <- fit$training_data
+scale_params <- fit$scale_params
+predictors   <- fit$predictors
+has_scored   <- !is.null(scored)
+
+invisible(stopifnot(inherits(fit, "calmer_fit")))
+```
+
+# 1. Training summary
+
+The model was fit on `r nrow(training)` reads sampled from primary
+alignments. Predictors used: `r paste(predictors, collapse = ", ")`.
+
+```{r training_predictor_ranges}
+ranges <- lapply(predictors, function(p) {
+  v <- training[[p]]
+  data.frame(predictor = p,
+             min       = min(v, na.rm = TRUE),
+             median    = median(v, na.rm = TRUE),
+             max       = max(v, na.rm = TRUE),
+             sd        = sd(v, na.rm = TRUE))
+}) |> dplyr::bind_rows()
+
+knitr::kable(ranges, digits = 2, caption = "Predictor distributions on the training data.")
+```
+
+```{r mapq_dist, fig.height = 3.5, fig.cap = "Observed MAPQ distribution on training data."}
+ggplot(training, aes(x = MAPQ)) +
+  geom_histogram(binwidth = 1, fill = "steelblue", color = "white", alpha = 0.85) +
+  scale_x_continuous(breaks = c(0, 10, 20, 30, 40, 50, 60)) +
+  labs(x = "MAPQ", y = "Count") +
+  theme_minimal()
+```
+
+# 2. Model fit
+
+```{r model_summary, results = "asis"}
+cat("**Formulas used:**\n\n")
+cat("- $\\mu$:    `",    deparse1(fit$formula$mu),    "`\n", sep = "")
+cat("- $\\sigma$: `", deparse1(fit$formula$sigma), "`\n", sep = "")
+cat("- $\\nu$:    `",    deparse1(fit$formula$nu),    "`\n", sep = "")
+cat("- $\\tau$:   `",   deparse1(fit$formula$tau),   "`\n", sep = "")
+```
+
+```{r edf_table}
+extract_edfs <- function(model, what) {
+  smos <- tryCatch(
+    lapply(seq_len(20), function(i) {
+      x <- try(getSmo(model, what = what, which = i), silent = TRUE)
+      if (inherits(x, "try-error")) NULL else x
+    }),
+    error = function(e) list()
+  )
+  smos <- Filter(Negate(is.null), smos)
+  if (length(smos) == 0L) return(NULL)
+  data.frame(
+    parameter = what,
+    term      = vapply(smos, function(x) if (!is.null(x$name)) x$name else NA_character_, character(1)),
+    edf       = vapply(smos, function(x) if (!is.null(x$edf))  x$edf  else NA_real_,      numeric(1))
+  )
+}
+
+edf_df <- dplyr::bind_rows(
+  extract_edfs(fit$fit, "mu"),
+  extract_edfs(fit$fit, "sigma"),
+  extract_edfs(fit$fit, "nu"),
+  extract_edfs(fit$fit, "tau")
+)
+
+if (!is.null(edf_df) && nrow(edf_df) > 0) {
+  knitr::kable(edf_df, digits = 2,
+               caption = "Effective degrees of freedom for each smooth term.")
+}
+```
+
+```{r rsq, results = "asis"}
+rsq <- tryCatch(round(gamlss::Rsq(fit$fit), 4), error = function(e) NA_real_)
+cat("**Pseudo-$R^2$:** ", rsq, "\n", sep = "")
+```
+
+# 3. Residual diagnostics
+
+Randomized quantile residuals (RQR) should be approximately $N(0, 1)$
+under a correctly specified BEINF model.
+
+```{r residuals_compute}
+qr_train <- stats::residuals(fit$fit)
+qr_df <- data.frame(qr = qr_train, n_isoforms = training$n_isoforms)
+```
+
+```{r qq_density, fig.height = 4, fig.cap = "Global QQ plot (left) and density vs N(0, 1) (right)."}
+qq_pts <- stats::qqnorm(qr_train, plot.it = FALSE)
+qq_df <- data.frame(theoretical = qq_pts$x, sample = qq_pts$y)
+
+p_qq <- ggplot(qq_df, aes(x = theoretical, y = sample)) +
+  geom_point(alpha = 0.3, size = 0.5) +
+  geom_abline(slope = 1, intercept = 0, color = "red", linetype = "dashed") +
+  labs(x = "Theoretical quantiles", y = "RQR") +
+  theme_minimal()
+
+p_dens <- ggplot(data.frame(qr = qr_train), aes(x = qr)) +
+  geom_density(fill = "steelblue", alpha = 0.5) +
+  stat_function(fun = dnorm, color = "red", linetype = "dashed") +
+  labs(x = "RQR", y = "Density") +
+  theme_minimal()
+
+p_qq + p_dens
+```
+
+```{r resid_by_niso, fig.height = 5, fig.cap = "RQR density faceted by n_isoforms with N(0, 1) reference (red dashed)."}
+qr_df_facet <- qr_df |> dplyr::filter(!is.na(n_isoforms))
+ggplot(qr_df_facet, aes(x = qr)) +
+  geom_density(fill = "steelblue", alpha = 0.5) +
+  stat_function(fun = dnorm, color = "red", linetype = "dashed", linewidth = 0.5) +
+  facet_wrap(~ n_isoforms, scales = "free_y") +
+  labs(x = "RQR", y = "Density",
+       title = "RQR density by n_isoforms") +
+  theme_minimal(base_size = 10)
+```
+
+# 4. Partial effects
+
+Each panel varies one predictor over its training range while holding
+the others at their training median.
+
+```{r partial_effects, fig.height = 12, fig.cap = "Partial effects for all four BEINF parameters."}
+n_grid <- 200
+make_base_nd <- function(n) {
+  base <- as.data.frame(lapply(predictors, function(p) {
+    rep(stats::median(training[[paste0(p, "_sc")]], na.rm = TRUE), n)
+  }))
+  names(base) <- paste0(predictors, "_sc")
+  for (p in predictors) {
+    base[[p]] <- rep(stats::median(training[[p]], na.rm = TRUE), n)
+  }
+  base$y <- rep(stats::median(training$y, na.rm = TRUE), n)
+  base
+}
+
+predict_param <- function(nd, what) {
+  stats::predict(fit$fit, newdata = nd, what = what, type = "response")
+}
+
+partial_panels <- function(what, y_lab) {
+  panels <- lapply(predictors, function(p) {
+    nd      <- make_base_nd(n_grid)
+    raw_seq <- seq(min(training[[p]], na.rm = TRUE),
+                   max(training[[p]], na.rm = TRUE),
+                   length.out = n_grid)
+    nd[[paste0(p, "_sc")]] <- (raw_seq - scale_params[[p]]$center) /
+                              scale_params[[p]]$scale
+    nd[[p]] <- raw_seq
+    df <- data.frame(x = raw_seq, y = predict_param(nd, what))
+    log_x <- p == "tx_length"
+    p_obj <- ggplot(df, aes(x, y)) +
+      geom_line(color = "steelblue", linewidth = 0.9) +
+      labs(x = p, y = y_lab, title = p) +
+      theme_minimal(base_size = 9)
+    if (log_x) p_obj <- p_obj + scale_x_log10()
+    p_obj
+  })
+  patchwork::wrap_plots(panels, nrow = 1)
+}
+
+(partial_panels("mu",    expression(mu))) /
+(partial_panels("sigma", expression(sigma))) /
+(partial_panels("nu",    expression(nu))) /
+(partial_panels("tau",   expression(tau)))
+```
+
+# 5. Calibration
+
+Predicted boundary probabilities versus the observed binary indicators.
+The dashed line is the identity (perfect calibration).
+
+```{r calibration, fig.height = 4, fig.cap = "Calibration of P(MAPQ = 0) (left) and P(MAPQ = 60) (right)."}
+mu_hat    <- stats::fitted(fit$fit, what = "mu")
+sigma_hat <- stats::fitted(fit$fit, what = "sigma")
+nu_hat    <- stats::fitted(fit$fit, what = "nu")
+tau_hat   <- stats::fitted(fit$fit, what = "tau")
+denom     <- 1 + nu_hat + tau_hat
+
+cal_df <- data.frame(
+  p0_hat = nu_hat  / denom,
+  p1_hat = tau_hat / denom,
+  is_0   = as.numeric(training$y == 0),
+  is_1   = as.numeric(training$y == 1)
+)
+
+p_cal0 <- ggplot(cal_df, aes(p0_hat, is_0)) +
+  geom_smooth(method = "loess", se = TRUE, color = "steelblue") +
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed") +
+  xlim(0, 1) + ylim(0, 1) +
+  labs(x = expression("Predicted P(MAPQ = 0)"),
+       y = "Observed", title = "P(MAPQ = 0)") +
+  theme_minimal()
+
+p_cal1 <- ggplot(cal_df, aes(p1_hat, is_1)) +
+  geom_smooth(method = "loess", se = TRUE, color = "steelblue") +
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed") +
+  xlim(0, 1) + ylim(0, 1) +
+  labs(x = expression("Predicted P(MAPQ = 60)"),
+       y = "Observed", title = "P(MAPQ = 60)") +
+  theme_minimal()
+
+p_cal0 + p_cal1
+```
+
+```{r scoring_setup, eval = has_scored, include = FALSE}
+flag_thresh <- attr(scored, "flag_threshold")
+filt_method <- attr(scored, "filter_method")
+threshold   <- attr(scored, "threshold")
+n_total     <- nrow(scored)
+n_scored    <- sum(!is.na(scored$rqr))
+n_flagged   <- sum(scored$flag_low %in% TRUE)
+```
+
+```{r scoring_header, eval = has_scored, results = "asis"}
+cat("# 6. Scoring summary\n\n")
+cat(sprintf("- Filter method: **%s**\n", filt_method))
+cat(sprintf("- Threshold:     **%g**\n", threshold))
+cat(sprintf("- Residual cut:  RQR < %.3f\n", flag_thresh))
+cat(sprintf("- Reads scored:  %d / %d\n", n_scored, n_total))
+cat(sprintf("- Reads flagged: %d (%.2f%% of scored)\n",
+            n_flagged, 100 * n_flagged / max(n_scored, 1)))
+```
+
+```{r rqr_scored_density, eval = has_scored, fig.height = 4, fig.cap = "RQR distribution on scored reads with flag threshold (red dashed)."}
+ggplot(scored[!is.na(scored$rqr), ], aes(x = rqr)) +
+  geom_density(fill = "steelblue", alpha = 0.5) +
+  geom_vline(xintercept = flag_thresh, color = "red", linetype = "dashed") +
+  labs(x = "RQR", y = "Density") +
+  theme_minimal()
+```
+
+```{r flags_header, eval = has_scored, results = "asis"}
+cat("# 7. Where flags landed\n\n")
+```
+
+```{r flags_heatmap, eval = has_scored, fig.height = 5, fig.cap = "Flag rate (% reads flagged) by n_isoforms x pct_covered."}
+pct_breaks <- seq(0, 100, by = 10)
+pct_labels <- paste0(pct_breaks[-length(pct_breaks)], "-", pct_breaks[-1], "%")
+
+hm <- scored |>
+  dplyr::filter(!is.na(.data$rqr)) |>
+  dplyr::mutate(
+    pct_cov_bin = cut(.data$pct_covered, breaks = pct_breaks,
+                      include.lowest = TRUE, labels = pct_labels)
+  ) |>
+  dplyr::filter(!is.na(.data$pct_cov_bin)) |>
+  dplyr::group_by(.data$n_isoforms, .data$pct_cov_bin) |>
+  dplyr::summarise(n = dplyr::n(),
+                   pct_flagged = mean(.data$flag_low) * 100,
+                   .groups = "drop")
+
+ggplot(hm, aes(x = factor(n_isoforms), y = pct_cov_bin, fill = pct_flagged)) +
+  geom_tile(color = "white", linewidth = 0.3) +
+  geom_text(aes(label = ifelse(n >= 10,
+                               paste0(round(pct_flagged, 1), "%"), "")),
+            size = 2.2, color = "white") +
+  scale_fill_distiller(palette = "Oranges", direction = 1,
+                       name = "% flagged") +
+  labs(x = "n_isoforms", y = "pct_covered bin") +
+  theme_minimal(base_size = 10)
+```
+
+```{r flag_by_niso, eval = has_scored, fig.height = 4, fig.cap = "Percent flagged by n_isoforms."}
+scored |>
+  dplyr::filter(!is.na(.data$rqr)) |>
+  dplyr::group_by(.data$n_isoforms) |>
+  dplyr::summarise(pct_flagged = mean(.data$flag_low) * 100, .groups = "drop") |>
+  ggplot(aes(x = factor(n_isoforms), y = pct_flagged)) +
+  geom_col(fill = "#D85A30", alpha = 0.85) +
+  geom_text(aes(label = paste0(round(pct_flagged, 1), "%")),
+            vjust = -0.4, size = 3) +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.15))) +
+  labs(x = "n_isoforms", y = "% reads flagged") +
+  theme_minimal()
+```
+
+```{r mapq_by_flag, eval = has_scored, fig.height = 4, fig.cap = "MAPQ distribution by flag status."}
+scored |>
+  dplyr::filter(!is.na(.data$rqr)) |>
+  ggplot(aes(x = .data$MAPQ, fill = .data$flag_low)) +
+  geom_density(alpha = 0.4) +
+  scale_fill_manual(values = c("FALSE" = "grey60", "TRUE" = "#D85A30"),
+                    labels = c("FALSE" = "Kept", "TRUE" = "Flagged")) +
+  labs(x = "MAPQ", y = "Density", fill = NULL) +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+```
