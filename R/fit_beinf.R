@@ -47,6 +47,7 @@
 #' }
 #'
 #' @importFrom stats as.formula sd
+#' @importFrom gamlss pb
 #' @export
 fit_beinf <- function(features,
                       n             = 50000,
@@ -94,7 +95,7 @@ fit_beinf <- function(features,
   }
 
   predictors_sc <- paste0(predictors, "_sc")
-  default_rhs <- paste(paste0("gamlss::pb(", predictors_sc, ")"),
+  default_rhs <- paste(paste0("pb(", predictors_sc, ")"),
                        collapse = " + ")
   if (is.null(formula))       formula       <- stats::as.formula(paste("y ~", default_rhs))
   if (is.null(sigma_formula)) sigma_formula <- stats::as.formula(paste("~",   default_rhs))
