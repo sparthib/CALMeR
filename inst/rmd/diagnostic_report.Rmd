@@ -173,7 +173,8 @@ make_base_nd <- function(n) {
 }
 
 predict_param <- function(nd, what) {
-  stats::predict(fit$fit, newdata = nd, what = what, type = "response")
+  stats::predict(fit$fit, newdata = nd, what = what, type = "response",
+                 data = training)
 }
 
 partial_panels <- function(what, y_lab) {

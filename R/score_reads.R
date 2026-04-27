@@ -93,13 +93,13 @@ score_reads <- function(features,
                       drop = FALSE]
 
   mu_p    <- stats::predict(fit$fit, newdata = newdata, what = "mu",
-                            type = "response")
+                            type = "response", data = fit$training_data)
   sigma_p <- stats::predict(fit$fit, newdata = newdata, what = "sigma",
-                            type = "response")
+                            type = "response", data = fit$training_data)
   nu_p    <- stats::predict(fit$fit, newdata = newdata, what = "nu",
-                            type = "response")
+                            type = "response", data = fit$training_data)
   tau_p   <- stats::predict(fit$fit, newdata = newdata, what = "tau",
-                            type = "response")
+                            type = "response", data = fit$training_data)
 
   rqr <- compute_rqr_beinf(
     y     = newdata$y,
