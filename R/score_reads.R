@@ -26,9 +26,15 @@
 #' @param primary_only Logical; if `TRUE` (default) score only primary
 #'   alignments. Secondary alignments inherit `flag_low = FALSE`.
 #'
+#' Reads with at least one predictor outside the training-data range
+#'   are marked as `out_of_range = TRUE` and not scored, since the
+#'   model's cubic-spline extrapolation is unreliable beyond the
+#'   data it saw during fitting.
+#'
 #' @return A data frame with the input columns plus `mu_p`, `sigma_p`,
-#'   `nu_p`, `tau_p`, `rqr`, `flag_low`, and an integer attribute
-#'   `"flag_threshold"` recording the absolute residual threshold used.
+#'   `nu_p`, `tau_p`, `rqr`, `flag_low`, `out_of_range`, and an
+#'   attribute `"flag_threshold"` recording the absolute residual
+#'   threshold used.
 #'
 #' @examples
 #' \dontrun{
@@ -82,8 +88,25 @@ score_reads <- function(features,
   if (primary_only && "aln_type" %in% names(features)) {
     scorable <- scorable & (features$aln_type == "P")
   }
+
+  features$out_of_range <- FALSE
+  for (p in predictors) {
+    rng     <- range(fit$training_data[[p]], na.rm = TRUE)
+    too_low <- !is.na(features[[p]]) & features[[p]] < rng[1]
+    too_hi  <- !is.na(features[[p]]) & features[[p]] > rng[2]
+    out     <- too_low | too_hi
+    if (any(out)) {
+      message(sprintf(
+        "score_reads: %d reads have %s outside training range [%g, %g]; marking unscored.",
+        sum(out), p, rng[1], rng[2]
+      ))
+    }
+    features$out_of_range <- features$out_of_range | out
+  }
+  scorable <- scorable & !features$out_of_range
+
   if (!any(scorable)) {
-    warning("No scorable reads (all rows have NA predictors).")
+    warning("No scorable reads (all rows have NA or out-of-range predictors).")
     attr(features, "flag_threshold") <- NA_real_
     return(features)
   }

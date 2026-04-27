@@ -1,5 +1,5 @@
 ---
-title: "CALMeR Diagnostic Report"
+title: "`r if (!is.null(params$sample_name)) paste0('CALMeR Diagnostic Report — ', params$sample_name) else 'CALMeR Diagnostic Report'`"
 date: "`r format(Sys.Date(), '%Y-%m-%d')`"
 output:
   pdf_document:
@@ -16,6 +16,7 @@ output:
 params:
   fit: !r NULL
   scored: !r NULL
+  sample_name: !r NULL
 ---
 
 ```{r setup, include = FALSE}
@@ -142,23 +143,47 @@ p_dens <- ggplot(data.frame(qr = qr_train), aes(x = qr)) +
 p_qq + p_dens
 ```
 
-```{r resid_by_niso, fig.height = 5, fig.cap = "RQR density faceted by n_isoforms with N(0, 1) reference (red dashed)."}
-qr_df_facet <- qr_df |> dplyr::filter(!is.na(n_isoforms))
-ggplot(qr_df_facet, aes(x = qr)) +
-  geom_density(fill = "steelblue", alpha = 0.5) +
-  stat_function(fun = dnorm, color = "red", linetype = "dashed", linewidth = 0.5) +
-  facet_wrap(~ n_isoforms, scales = "free_y") +
-  labs(x = "RQR", y = "Density",
-       title = "RQR density by n_isoforms") +
-  theme_minimal(base_size = 10)
+```{r resid_by_predictor, fig.height = 5, fig.cap = "RQR density faceted by predictor bins, with N(0, 1) reference (red dashed)."}
+make_rqr_facet <- function(predictor_name, n_bins = 5) {
+  values <- training[[predictor_name]]
+  if (length(unique(values)) <= 10) {
+    bin   <- factor(values)
+    label <- predictor_name
+  } else {
+    qs    <- stats::quantile(values, seq(0, 1, length.out = n_bins + 1),
+                             na.rm = TRUE)
+    bin   <- cut(values, breaks = unique(qs), include.lowest = TRUE,
+                 dig.lab = 4)
+    label <- paste0(predictor_name, " (quantile bin)")
+  }
+  qr_df <- data.frame(qr = qr_train, bin = bin) |>
+    dplyr::filter(!is.na(.data$bin))
+  ggplot(qr_df, aes(x = qr)) +
+    geom_density(fill = "steelblue", alpha = 0.5) +
+    stat_function(fun = dnorm, color = "red", linetype = "dashed",
+                  linewidth = 0.5) +
+    facet_wrap(~ bin, scales = "free_y") +
+    labs(x = "RQR", y = "Density", title = label) +
+    theme_minimal(base_size = 9)
+}
+
+for (p in predictors) {
+  print(make_rqr_facet(p))
+}
 ```
 
-# 4. Partial effects
+# 4. Partial effects on E[MAPQ]
 
 Each panel varies one predictor over its training range while holding
-the others at their training median.
+the others at their training median, and shows the model's expected
+MAPQ:
 
-```{r partial_effects, fig.height = 12, fig.cap = "Partial effects for all four BEINF parameters."}
+$$
+E[Y] \;=\; \frac{\tau + \mu}{1 + \nu + \tau}, \qquad
+E[\mathrm{MAPQ}] = 60 \cdot E[Y]
+$$
+
+```{r partial_effects_ey, fig.height = 4, fig.cap = "Partial effects on E[MAPQ]."}
 n_grid <- 200
 make_base_nd <- function(n) {
   base <- as.data.frame(lapply(predictors, function(p) {
@@ -172,74 +197,86 @@ make_base_nd <- function(n) {
   base
 }
 
-predict_param <- function(nd, what) {
-  stats::predict(fit$fit, newdata = nd, what = what, type = "response",
-                 data = training)
+predict_ey <- function(nd) {
+  mu_p  <- stats::predict(fit$fit, newdata = nd, what = "mu",
+                          type = "response", data = training)
+  nu_p  <- stats::predict(fit$fit, newdata = nd, what = "nu",
+                          type = "response", data = training)
+  tau_p <- stats::predict(fit$fit, newdata = nd, what = "tau",
+                          type = "response", data = training)
+  (tau_p + mu_p) / (1 + nu_p + tau_p) * 60
 }
 
-partial_panels <- function(what, y_lab) {
-  panels <- lapply(predictors, function(p) {
-    nd      <- make_base_nd(n_grid)
-    raw_seq <- seq(min(training[[p]], na.rm = TRUE),
-                   max(training[[p]], na.rm = TRUE),
-                   length.out = n_grid)
-    nd[[paste0(p, "_sc")]] <- (raw_seq - scale_params[[p]]$center) /
-                              scale_params[[p]]$scale
-    nd[[p]] <- raw_seq
-    df <- data.frame(x = raw_seq, y = predict_param(nd, what))
-    log_x <- p == "tx_length"
-    p_obj <- ggplot(df, aes(x, y)) +
-      geom_line(color = "steelblue", linewidth = 0.9) +
-      labs(x = p, y = y_lab, title = p) +
-      theme_minimal(base_size = 9)
-    if (log_x) p_obj <- p_obj + scale_x_log10()
-    p_obj
-  })
-  patchwork::wrap_plots(panels, nrow = 1)
-}
+ey_panels <- lapply(predictors, function(p) {
+  nd      <- make_base_nd(n_grid)
+  raw_seq <- seq(min(training[[p]], na.rm = TRUE),
+                 max(training[[p]], na.rm = TRUE),
+                 length.out = n_grid)
+  nd[[paste0(p, "_sc")]] <- (raw_seq - scale_params[[p]]$center) /
+                            scale_params[[p]]$scale
+  nd[[p]] <- raw_seq
+  df <- data.frame(x = raw_seq, y = predict_ey(nd))
+  log_x <- p == "tx_length"
+  p_obj <- ggplot(df, aes(x, y)) +
+    geom_line(color = "steelblue", linewidth = 0.9) +
+    coord_cartesian(ylim = c(0, 60)) +
+    scale_y_continuous(breaks = c(0, 10, 20, 30, 40, 50, 60)) +
+    labs(x = p, y = "E[MAPQ]", title = p) +
+    theme_minimal(base_size = 9)
+  if (log_x) p_obj <- p_obj + scale_x_log10()
+  p_obj
+})
 
-(partial_panels("mu",    expression(mu))) /
-(partial_panels("sigma", expression(sigma))) /
-(partial_panels("nu",    expression(nu))) /
-(partial_panels("tau",   expression(tau)))
+patchwork::wrap_plots(ey_panels, nrow = 1)
 ```
 
-# 5. Calibration
+# 5. Coefficient forest plot
 
-Predicted boundary probabilities versus the observed binary indicators.
-The dashed line is the identity (perfect calibration).
+Linear (parametric) coefficients for each BEINF parameter, with 95%
+Wald confidence intervals. For `pb()` smoothers, the coefficient is the
+linear part of the spline term — the "average direction" of the
+relationship — while the smoother adds non-linear shape on top. The
+dashed vertical line at zero marks no effect.
 
-```{r calibration, fig.height = 4, fig.cap = "Calibration of P(MAPQ = 0) (left) and P(MAPQ = 60) (right)."}
-mu_hat    <- stats::fitted(fit$fit, what = "mu")
-sigma_hat <- stats::fitted(fit$fit, what = "sigma")
-nu_hat    <- stats::fitted(fit$fit, what = "nu")
-tau_hat   <- stats::fitted(fit$fit, what = "tau")
-denom     <- 1 + nu_hat + tau_hat
+```{r forest_plot, fig.height = 6, fig.cap = "95% Wald CIs for parametric coefficients across BEINF parameters."}
+get_coef_df <- function(model) {
+  rows <- list()
+  for (what in c("mu", "sigma", "nu", "tau")) {
+    b <- tryCatch(stats::coef(model, what = what),
+                  error = function(e) NULL)
+    if (is.null(b) || length(b) == 0L) next
+    se <- tryCatch({
+      v <- stats::vcov(model, what = what)
+      if (is.matrix(v)) sqrt(diag(v))[seq_along(b)]
+      else if (is.numeric(v)) v[seq_along(b)]
+      else rep(NA_real_, length(b))
+    }, error = function(e) rep(NA_real_, length(b)))
+    rows[[what]] <- data.frame(
+      parameter = what,
+      term      = names(b),
+      estimate  = unname(b),
+      se        = unname(se),
+      stringsAsFactors = FALSE
+    )
+  }
+  do.call(rbind, rows)
+}
 
-cal_df <- data.frame(
-  p0_hat = nu_hat  / denom,
-  p1_hat = tau_hat / denom,
-  is_0   = as.numeric(training$y == 0),
-  is_1   = as.numeric(training$y == 1)
-)
+coef_df <- get_coef_df(fit$fit)
+coef_df$lower <- coef_df$estimate - 1.96 * coef_df$se
+coef_df$upper <- coef_df$estimate + 1.96 * coef_df$se
+coef_df$parameter <- factor(coef_df$parameter,
+                            levels = c("mu", "sigma", "nu", "tau"))
 
-p_cal0 <- ggplot(cal_df, aes(p0_hat, is_0)) +
-  geom_smooth(method = "loess", se = TRUE, color = "steelblue") +
-  geom_abline(slope = 1, intercept = 0, linetype = "dashed") +
-  xlim(0, 1) + ylim(0, 1) +
-  labs(x = expression("Predicted P(MAPQ = 0)"),
-       y = "Observed", title = "P(MAPQ = 0)") +
-  theme_minimal()
-
-p_cal1 <- ggplot(cal_df, aes(p1_hat, is_1)) +
-  geom_smooth(method = "loess", se = TRUE, color = "steelblue") +
-  geom_abline(slope = 1, intercept = 0, linetype = "dashed") +
-  xlim(0, 1) + ylim(0, 1) +
-  labs(x = expression("Predicted P(MAPQ = 60)"),
-       y = "Observed", title = "P(MAPQ = 60)") +
-  theme_minimal()
-
-p_cal0 + p_cal1
+ggplot(coef_df, aes(x = estimate, y = term)) +
+  geom_vline(xintercept = 0, linetype = "dashed", color = "grey60") +
+  geom_errorbarh(aes(xmin = lower, xmax = upper), height = 0.2,
+                 color = "steelblue", na.rm = TRUE) +
+  geom_point(color = "steelblue", size = 1.6) +
+  facet_wrap(~ parameter, scales = "free", ncol = 2) +
+  labs(x = "Coefficient (link scale)", y = NULL) +
+  theme_minimal(base_size = 10) +
+  theme(strip.text = element_text(face = "bold"))
 ```
 
 ```{r scoring_setup, eval = has_scored, include = FALSE}

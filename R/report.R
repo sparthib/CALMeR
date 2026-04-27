@@ -9,9 +9,9 @@
 #'   \item Training summary (predictor distributions, MAPQ histogram).
 #'   \item Model fit (formulas, EDFs, pseudo-R^2).
 #'   \item Residual diagnostics (global QQ + density vs N(0,1), RQR
-#'         density faceted by `n_isoforms`).
-#'   \item Partial effects for all four BEINF parameters.
-#'   \item Calibration of P(MAPQ = 0) and P(MAPQ = 60).
+#'         density faceted by each predictor's quantile bins).
+#'   \item Partial effects on E[MAPQ].
+#'   \item Coefficient forest plot for all BEINF parameters.
 #'   \item Scoring summary — only if `scored` is supplied.
 #'   \item Where flags landed — only if `scored` is supplied.
 #' }
@@ -20,6 +20,7 @@
 #' @param scored Optional data frame returned by [score_reads()].
 #' @param out_file Path to the rendered report.
 #' @param format Either `"pdf"` (default) or `"html"`.
+#' @param sample_name Optional string displayed in the report title.
 #'
 #' @return Invisibly, the absolute path to the rendered file.
 #'
@@ -30,9 +31,10 @@
 #'
 #' @export
 calmer_report <- function(fit,
-                          scored   = NULL,
+                          scored      = NULL,
                           out_file,
-                          format   = c("pdf", "html")) {
+                          format      = c("pdf", "html"),
+                          sample_name = NULL) {
   format <- match.arg(format)
 
   if (!inherits(fit, "calmer_fit")) {
@@ -61,7 +63,9 @@ calmer_report <- function(fit,
     input         = template,
     output_format = output_format,
     output_file   = out_file,
-    params        = list(fit = fit, scored = scored),
+    params        = list(fit         = fit,
+                         scored      = scored,
+                         sample_name = sample_name),
     envir         = new.env(parent = globalenv()),
     quiet         = TRUE
   )

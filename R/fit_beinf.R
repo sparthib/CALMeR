@@ -95,7 +95,7 @@ fit_beinf <- function(features,
   }
 
   predictors_sc <- paste0(predictors, "_sc")
-  default_rhs <- paste(paste0("pb(", predictors_sc, ")"),
+  default_rhs <- paste(paste0("pb(", predictors_sc, ", inter = 5)"),
                        collapse = " + ")
   if (is.null(formula))       formula       <- stats::as.formula(paste("y ~", default_rhs))
   if (is.null(sigma_formula)) sigma_formula <- stats::as.formula(paste("~",   default_rhs))
