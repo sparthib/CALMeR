@@ -2,34 +2,35 @@
 % Please edit documentation in R/example_data.R
 \name{calmer_example_data}
 \alias{calmer_example_data}
-\title{Build a small example dataset for CALMeR examples}
+\title{Paths to CALMeR's bundled example dataset}
 \usage{
 calmer_example_data()
 }
 \value{
-A named list with character paths:
+A named list of character paths:
 \describe{
-\item{\code{dir}}{The tempdir holding all files (delete to clean up).}
-\item{\code{bam}}{Tiny BAM (sorted, indexed).}
-\item{\code{gtf}}{Matching GTF.}
+\item{\code{bam}}{Sorted, indexed transcriptome BAM (~2000 alignments).}
+\item{\code{gtf}}{Matching GTF (transcripts present in \code{bam} only).}
 \item{\code{fasta}}{Matching transcriptome FASTA.}
-\item{\code{paf}}{Tiny PAF with one cross-gene paralog hit.}
+\item{\code{paf}}{\code{minimap2} self-alignment of \code{fasta}, ready for
+\code{\link[=make_paralog_table]{make_paralog_table()}}.}
 }
 }
 \description{
-Creates a temporary directory containing a tiny BAM, GTF, FASTA, and PAF
-suitable for exercising the CALMeR pipeline in examples and tests
-without external data. Five transcripts on three genes, ~200 synthetic
-reads with MAPQ values spanning the full 0-60 range, varying transcript
-lengths, varying GC content, and varying alignment coverage.
+CALMeR ships with a small example bundle in \verb{inst/extdata/}: a BAM
+subsampled from a real PCR cDNA long-read sample (~2000 reads), a
+matching GTF and transcriptome FASTA pruned to only the transcripts
+those reads align to, and a \code{minimap2} self-alignment PAF used by
+\code{\link[=make_paralog_table]{make_paralog_table()}}. Returns the resolved paths.
 }
 \details{
-Cleanup is the caller's responsibility: \code{unlink(result$dir, recursive = TRUE)}.
+These files live inside the installed package, so they should be
+treated as read-only. Use \code{\link[=tempfile]{tempfile()}} / \code{\link[=tempdir]{tempdir()}} for any output
+files an example writes (filtered BAM, report, etc.).
 }
 \examples{
 ex <- calmer_example_data()
-file.exists(ex$bam)
-unlink(ex$dir, recursive = TRUE)
+file.exists(ex$bam) && file.exists(ex$gtf) &&
+  file.exists(ex$fasta) && file.exists(ex$paf)
 
 }
-\keyword{internal}

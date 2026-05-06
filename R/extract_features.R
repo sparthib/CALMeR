@@ -46,7 +46,6 @@
 #' ex <- calmer_example_data()
 #' features <- extract_features(ex$bam, ex$gtf, ex$fasta)
 #' head(features)
-#' unlink(ex$dir, recursive = TRUE)
 #'
 #' @importFrom Rsamtools scanBam ScanBamParam scanBamFlag indexBam
 #' @importFrom GenomicAlignments cigarWidthAlongQuerySpace

@@ -35,7 +35,6 @@
 #' features <- extract_features(ex$bam, ex$gtf, ex$fasta)
 #' clean    <- clean_features(features)
 #' nrow(features); nrow(clean)
-#' unlink(ex$dir, recursive = TRUE)
 #'
 #' @export
 clean_features <- function(features,

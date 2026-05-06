@@ -57,7 +57,6 @@
 #'   paf_path = ex$paf
 #' )
 #' head(paralog)
-#' unlink(ex$dir, recursive = TRUE)
 #'
 #' @importFrom rtracklayer import
 #' @importFrom data.table fread
@@ -117,13 +116,15 @@ make_paralog_table <- function(fasta,
     dplyr::select("transcript_id", "gene_id") |>
     dplyr::distinct()
 
-  # Parse PAF (12 fixed cols; PAF can have extra optional tag cols).
+  # Parse PAF (12 fixed cols; PAF can have a variable number of optional
+  # tag cols per row, so use fill = Inf so fread doesn't lock onto the
+  # column count from the first few rows).
   paf <- data.table::fread(
     paf_path, select = seq_len(12L), header = FALSE, sep = "\t",
     col.names = c("qname", "qlen", "qstart", "qend", "strand",
                   "tname", "tlen", "tstart", "tend",
                   "nmatch", "alen", "mapq"),
-    fill = TRUE
+    fill = Inf
   )
   paf$pct_id    <- paf$nmatch / paf$alen * 100
   paf$query_cov <- (paf$qend - paf$qstart) / paf$qlen * 100

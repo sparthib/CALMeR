@@ -87,6 +87,5 @@ paralog <- make_paralog_table(
   paf_path = ex$paf
 )
 head(paralog)
-unlink(ex$dir, recursive = TRUE)
 
 }

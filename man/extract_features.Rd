@@ -70,6 +70,5 @@ attempted with the version stripped.
 ex <- calmer_example_data()
 features <- extract_features(ex$bam, ex$gtf, ex$fasta)
 head(features)
-unlink(ex$dir, recursive = TRUE)
 
 }

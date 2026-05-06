@@ -11,7 +11,7 @@ vignette: >
   %\VignetteEncoding{UTF-8}
 ---
 
-```{r setup, include = FALSE}
+```{r vignette-setup, include = FALSE}
 knitr::opts_chunk$set(collapse = TRUE, comment = "#>")
 ```
 
@@ -19,114 +19,101 @@ knitr::opts_chunk$set(collapse = TRUE, comment = "#>")
 
 `CALMeR` (Context-Aware Long-read MAPQ Rescuer) flags reads in long-read
 transcriptome BAM files whose MAPQ is anomalously low *given* their
-transcript context. It fits a Beta-Inflated (BEINF) regression model on a
-sampled subset of reads, computes randomized quantile residuals on the
-full table, and writes a filtered BAM plus a TSV of flagged reads.
+transcript context. It fits a Beta-Inflated (BEINF) regression model on
+a sampled subset of reads, computes randomized quantile residuals on
+the full table, and writes a filtered BAM plus a TSV of flagged reads.
 
 The motivation: a uniform MAPQ threshold (e.g. `samtools view -q 30`)
 disproportionately discards reads from highly multi-isoform genes,
-GC-extreme transcripts, and long transcripts — not because the alignments
-are low quality but because these transcript-level properties
-systematically suppress MAPQ. CALMeR conditions on transcript context to
-distinguish noise from biology.
-
-# Pipeline
+GC-extreme transcripts, and long transcripts — not because the
+alignments are low quality but because these transcript-level
+properties systematically suppress MAPQ. CALMeR conditions on
+transcript context to distinguish noise from biology.
 
 The standard pipeline is six steps; each function is one stage:
 
-1. `extract_features()` — read the BAM + GTF + transcriptome FASTA, build a
-   per-read feature table (MAPQ, alignment length, transcript length,
-   isoform count per gene, GC content, percent transcript covered).
-2. `clean_features()` — apply standard pre-fit filters (primary alignments
-   only, n_isoforms cap, GC range, length range).
+1. `extract_features()` — read the BAM + GTF + transcriptome FASTA,
+   build a per-read feature table (MAPQ, alignment length, transcript
+   length, isoform count per gene, GC content, percent transcript
+   covered).
+2. `clean_features()` — apply standard pre-fit filters (primary
+   alignments only, n_isoforms cap, GC range, length range).
 3. `fit_beinf()` — fit a BEINF regression on a sampled subset.
-4. `score_reads()` — compute randomized quantile residuals for every read
-   and flag those whose RQR falls in the lower tail.
-5. `filter_bam()` — write a filtered BAM (flagged reads removed) + a TSV
-   of flagged reads with their feature values and residuals.
+4. `score_reads()` — compute randomized quantile residuals for every
+   read and flag those whose RQR falls in the lower tail.
+5. `filter_bam()` — write a filtered BAM (flagged reads removed) + a
+   TSV of flagged reads with their feature values and residuals.
 6. `calmer_report()` — render an HTML or PDF diagnostic report.
 
-A typical end-to-end call (requires a BAM, GTF, and transcriptome FASTA;
-see `?extract_features` for inputs):
+# End-to-end pipeline on bundled example data
 
-```{r workflow, eval = FALSE}
+CALMeR ships with a small example bundle (`calmer_example_data()`):
+~2,000 reads from a real PCR cDNA long-read sample, a matching pruned
+GTF and transcriptome FASTA, plus a precomputed `minimap2`
+self-alignment PAF.
+
+```{r pipeline}
 library(CALMeR)
+library(gamlss)   # so pb() resolves in user-supplied formulas
 
-bam   <- "sample.sorted.bam"
-gtf   <- "gencode.v46.gtf"
-fasta <- "transcripts.fa"
+ex <- calmer_example_data()
 
-features <- extract_features(bam, gtf, fasta)
-clean    <- clean_features(features)
-fit      <- fit_beinf(clean, n = 50000, seed = 42)
-scored   <- score_reads(features, fit,
-                         filter_method = "mad", threshold = -3)
-filt     <- filter_bam(bam, scored,
-                        out_bam = "sample_filtered.bam",
-                        out_tsv = "sample_flagged.tsv.gz")
-calmer_report(fit, scored, out_file = "sample_report.html",
-              format = "html", sample_name = "sample")
-```
-
-# Adding paralog status as an additional context predictor
-
-When a transcript has paralogs (sequence-similar transcripts on different
-genes), reads from that transcript may be ambiguously assigned even at
-moderate MAPQ. `make_paralog_table()` computes per-transcript paralog
-status from a `minimap2` self-alignment of the transcriptome FASTA.
-
-The example below runs end-to-end on synthetic GTF + PAF inputs, so it
-exercises the parser without requiring any external data:
-
-```{r paralog-runnable}
-library(CALMeR)
-
-td <- tempfile("calmer_vignette_")
-dir.create(td)
-
-# Tiny GTF: tx1 on gene1, tx2 on gene2, tx3 on gene1.
-gtf_path <- file.path(td, "ex.gtf")
-writeLines(c(
-    paste("chr1", "ex", "transcript", 1, 100, ".", "+", ".",
-          'gene_id "gene1"; transcript_id "tx1";', sep = "\t"),
-    paste("chr1", "ex", "transcript", 1, 200, ".", "+", ".",
-          'gene_id "gene2"; transcript_id "tx2";', sep = "\t"),
-    paste("chr1", "ex", "transcript", 1, 100, ".", "+", ".",
-          'gene_id "gene1"; transcript_id "tx3";', sep = "\t")
-), gtf_path)
-
-# Stub FASTA (only checked for existence; not parsed by make_paralog_table).
-fa_path <- file.path(td, "ex.fa")
-writeLines(c(">tx1", "ACGT", ">tx2", "ACGT", ">tx3", "ACGT"), fa_path)
-
-# Pre-built PAF row: tx1 ~ tx2 at 90% identity, full query coverage.
-paf_path <- file.path(td, "ex.paf")
-writeLines(paste("tx1", 100, 0, 100, "+", "tx2", 200, 0, 100,
-                 90, 100, 60, sep = "\t"),
-           paf_path)
-
+# Compute the per-transcript paralog status table (cached PAF in the
+# bundle; in production this would invoke minimap2 once per annotation).
 paralog <- make_paralog_table(
-    fasta    = fa_path,
-    gtf      = gtf_path,
-    paf_path = paf_path
+    fasta    = ex$fasta,
+    gtf      = ex$gtf,
+    paf_path = ex$paf
 )
-paralog
+
+features <- extract_features(ex$bam, ex$gtf, ex$fasta,
+                             paralog_table = paralog)
+clean    <- clean_features(features)
+
+# pb() smoothers on the four context predictors + linear paralog term.
+# Wrapping max_pct_id in pb() is unstable because most transcripts have
+# max_pct_id == 0; the linear form keeps a clean parametric coefficient.
+mu_rhs   <- y ~ pb(n_isoforms_sc) + pb(tx_length_sc) +
+                pb(gc_content_sc) + pb(pct_covered_sc) +
+                max_pct_id_sc
+nu_rhs   <-   ~ pb(n_isoforms_sc) + pb(tx_length_sc) +
+                pb(gc_content_sc) + pb(pct_covered_sc) +
+                max_pct_id_sc
+
+fit <- fit_beinf(
+    clean, n = 1000,
+    predictors    = c("n_isoforms", "tx_length", "gc_content",
+                      "pct_covered", "max_pct_id"),
+    formula       = mu_rhs,
+    sigma_formula = ~ 1,
+    nu_formula    = nu_rhs,
+    tau_formula   = nu_rhs
+)
+
+scored <- score_reads(features, fit, filter_method = "mad",
+                      threshold = -3)
 ```
 
-In production you would compute the PAF once per annotation by running
-`minimap2` self-alignment of the transcriptome FASTA. `make_paralog_table`
-will invoke `minimap2` automatically (declared via `SystemRequirements`)
-when no PAF is supplied; otherwise it parses the cached PAF.
+# Diagnostic report (rendered inline)
 
-The resulting table is then joined into `extract_features()`:
+The chunk below pulls in `inst/rmd/diagnostic_report.Rmd` as a child
+document and renders it inline as part of this vignette. All sections
+of the standalone report — predictor definitions, training summary,
+model fit, model comparison, residual diagnostics, partial effects,
+scoring summary, where flags landed — appear below.
 
-```{r paralog-pipeline, eval = FALSE}
-features <- extract_features(bam, gtf, fasta, paralog_table = paralog)
-fit <- fit_beinf(
-    features,
-    predictors = c("n_isoforms", "tx_length", "gc_content",
-                   "pct_covered", "max_pct_id")
+```{r setup-report-params, include = FALSE}
+# The report Rmd reads `params$fit`, `params$scored`, `params$sample_name`.
+# When run as a child document, no params block is processed, so we
+# define `params` in the parent environment and the child picks it up.
+params <- list(
+    fit         = fit,
+    scored      = scored,
+    sample_name = "vignette example (paralog-aware)"
 )
+```
+
+```{r child = system.file("rmd", "diagnostic_report.Rmd", package = "CALMeR")}
 ```
 
 # Session info

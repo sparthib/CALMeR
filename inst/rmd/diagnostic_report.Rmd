@@ -24,7 +24,9 @@ knitr::opts_chunk$set(
   echo       = FALSE,
   warning    = FALSE,
   message    = FALSE,
-  fig.align  = "center"
+  fig.align  = "center",
+  fig.crop   = FALSE,  # legacy pdfcrop option
+  crop       = FALSE   # disables knitr's magick-based PNG cropping
 )
 
 library(ggplot2)
@@ -41,6 +43,26 @@ has_scored   <- !is.null(scored)
 
 invisible(stopifnot(inherits(fit, "calmer_fit")))
 ```
+
+# Predictors
+
+CALMeR conditions MAPQ on the following per-read / per-transcript
+features. Default `clean_features()` filters are listed alongside;
+ranges shown in the partial-effects plots may be tighter (e.g.
+`n_isoforms` is capped at 7 in the partial-effect panel for visual
+clarity).
+
+| Predictor | What it measures | How it's computed | Default `clean_features()` filter |
+|---|---|---|---|
+| `n_isoforms` | Number of annotated isoforms of the **gene** that the read's target transcript belongs to. | `n_distinct(transcript_id)` per `gene_id`, from the GTF. | `<= 10` |
+| `tx_length` | Length of the target transcript in nucleotides. | Sum of exon widths per `transcript_id`, from the GTF. | `[100, 10000]` bp |
+| `gc_content` | GC composition of the target transcript. | `(G + C) / length` from the transcriptome FASTA. | `[30, 70]%` |
+| `pct_covered` | Fraction of the target transcript spanned by the read alignment. | `min(alignment_length / tx_length, 1)`, from the BAM CIGAR + GTF. | none (uses full 0-100% range) |
+| `max_pct_id` *(if present)* | Highest cross-gene transcript-level identity for the target. Captures paralog ambiguity. | `minimap2` self-alignment of the transcriptome FASTA, then `max(pct_id)` over hits with `alen >= 50` and `query_cov >= 70%`, restricted to cross-gene pairs. | none (raw 0-100%; 0 = no paralog) |
+
+The partial-effects plot caps `n_isoforms` at **7** for the x-axis even
+when training data extends higher, since most of the predictive content
+sits in the 1-7 range and very high values become sparse.
 
 # 1. Training summary
 
@@ -112,6 +134,85 @@ if (!is.null(edf_df) && nrow(edf_df) > 0) {
 ```{r rsq, results = "asis"}
 rsq <- tryCatch(round(gamlss::Rsq(fit$fit), 4), error = function(e) NA_real_)
 cat("**Pseudo-$R^2$:** ", rsq, "\n", sep = "")
+```
+
+# 2b. Model comparison
+
+Refits on the same training data with two alternative parameterizations:
+**(i)** linear terms in $\mu$, $\nu$, $\tau$ (this is what the user
+supplied if no spline override was given), and **(ii)** penalized
+B-splines with five interior knots in all three. $\sigma$ is held to an
+intercept-only formula in both, since modeling the beta-interior
+precision usually doesn't help on data of this size. AIC, BIC, and
+gamlss's pseudo-$R^2$ are reported alongside the user-supplied fit.
+
+```{r model_comparison_fit, results = "hide"}
+training    <- fit$training_data
+all_preds   <- fit$predictors
+non_paralog <- setdiff(all_preds, "max_pct_id")
+preds_all_sc <- paste0(all_preds,   "_sc")
+preds_np_sc  <- paste0(non_paralog, "_sc")
+
+# Three alternative parameterizations.
+lin_all_rhs <- paste(preds_all_sc, collapse = " + ")
+lin_np_rhs  <- paste(preds_np_sc,  collapse = " + ")
+# pb on every non-paralog predictor + plain linear paralog (if present).
+# Wrapping max_pct_id in pb() is unstable since most transcripts have
+# max_pct_id == 0; the linear form keeps a clean parametric coefficient.
+pb_terms_np <- paste0("pb(", preds_np_sc, ", inter = 5)", collapse = " + ")
+pb_mix_rhs  <- if ("max_pct_id" %in% all_preds) {
+  paste(pb_terms_np, "+ max_pct_id_sc")
+} else {
+  pb_terms_np
+}
+
+fit_silent <- function(mu_rhs, nu_rhs, tau_rhs) {
+  tryCatch(
+    suppressWarnings(gamlss::gamlss(
+      formula       = stats::as.formula(paste("y ~", mu_rhs)),
+      sigma.formula = ~ 1,
+      nu.formula    = stats::as.formula(paste("~", nu_rhs)),
+      tau.formula   = stats::as.formula(paste("~", tau_rhs)),
+      family        = gamlss.dist::BEINF(),
+      data          = training,
+      control       = gamlss::gamlss.control(trace = FALSE)
+    )),
+    error = function(e) NULL
+  )
+}
+
+mod_lin_all <- fit_silent(lin_all_rhs, lin_all_rhs, lin_all_rhs)
+mod_lin_np  <- fit_silent(lin_np_rhs,  lin_np_rhs,  lin_np_rhs)
+mod_pb_mix  <- fit_silent(pb_mix_rhs,  pb_mix_rhs,  pb_mix_rhs)
+
+extract_metrics <- function(m, label) {
+  if (is.null(m)) {
+    return(data.frame(Model = label, AIC = NA, BIC = NA,
+                      df = NA, `Pseudo R^2` = NA,
+                      check.names = FALSE))
+  }
+  rsq <- tryCatch(gamlss::Rsq(m), error = function(e) NA_real_)
+  data.frame(
+    Model        = label,
+    AIC          = round(AIC(m), 1),
+    BIC          = round(BIC(m), 1),
+    df           = round(m$df.fit, 1),
+    `Pseudo R^2` = round(rsq, 4),
+    check.names  = FALSE
+  )
+}
+
+cmp_tbl <- dplyr::bind_rows(
+  extract_metrics(fit$fit,     "User-supplied"),
+  extract_metrics(mod_lin_all, "All linear (5 predictors)"),
+  extract_metrics(mod_lin_np,  "All linear (no max_pct_id)"),
+  extract_metrics(mod_pb_mix,  "pb on 4 non-paralog + linear max_pct_id")
+)
+```
+
+```{r model_comparison_table}
+knitr::kable(cmp_tbl,
+             caption = "Model fit metrics on the training data. Lower AIC/BIC and higher pseudo-$R^2$ are better.")
 ```
 
 # 3. Residual diagnostics
@@ -208,10 +309,11 @@ predict_ey <- function(nd) {
 }
 
 ey_panels <- lapply(predictors, function(p) {
-  nd      <- make_base_nd(n_grid)
-  raw_seq <- seq(min(training[[p]], na.rm = TRUE),
-                 max(training[[p]], na.rm = TRUE),
-                 length.out = n_grid)
+  nd     <- make_base_nd(n_grid)
+  x_lo   <- min(training[[p]], na.rm = TRUE)
+  x_hi   <- max(training[[p]], na.rm = TRUE)
+  if (p == "n_isoforms") x_hi <- min(x_hi, 7)   # cap n_isoforms at 7
+  raw_seq <- seq(x_lo, x_hi, length.out = n_grid)
   nd[[paste0(p, "_sc")]] <- (raw_seq - scale_params[[p]]$center) /
                             scale_params[[p]]$scale
   nd[[p]] <- raw_seq
@@ -230,55 +332,6 @@ ey_panels <- lapply(predictors, function(p) {
 patchwork::wrap_plots(ey_panels, nrow = 1)
 ```
 
-# 5. Coefficient forest plot
-
-Linear (parametric) coefficients for each BEINF parameter, with 95%
-Wald confidence intervals. For `pb()` smoothers, the coefficient is the
-linear part of the spline term — the "average direction" of the
-relationship — while the smoother adds non-linear shape on top. The
-dashed vertical line at zero marks no effect.
-
-```{r forest_plot, fig.height = 6, fig.cap = "95% Wald CIs for parametric coefficients across BEINF parameters."}
-get_coef_df <- function(model) {
-  rows <- list()
-  for (what in c("mu", "sigma", "nu", "tau")) {
-    b <- tryCatch(stats::coef(model, what = what),
-                  error = function(e) NULL)
-    if (is.null(b) || length(b) == 0L) next
-    se <- tryCatch({
-      v <- stats::vcov(model, what = what)
-      if (is.matrix(v)) sqrt(diag(v))[seq_along(b)]
-      else if (is.numeric(v)) v[seq_along(b)]
-      else rep(NA_real_, length(b))
-    }, error = function(e) rep(NA_real_, length(b)))
-    rows[[what]] <- data.frame(
-      parameter = what,
-      term      = names(b),
-      estimate  = unname(b),
-      se        = unname(se),
-      stringsAsFactors = FALSE
-    )
-  }
-  do.call(rbind, rows)
-}
-
-coef_df <- get_coef_df(fit$fit)
-coef_df$lower <- coef_df$estimate - 1.96 * coef_df$se
-coef_df$upper <- coef_df$estimate + 1.96 * coef_df$se
-coef_df$parameter <- factor(coef_df$parameter,
-                            levels = c("mu", "sigma", "nu", "tau"))
-
-ggplot(coef_df, aes(x = estimate, y = term)) +
-  geom_vline(xintercept = 0, linetype = "dashed", color = "grey60") +
-  geom_errorbarh(aes(xmin = lower, xmax = upper), height = 0.2,
-                 color = "steelblue", na.rm = TRUE) +
-  geom_point(color = "steelblue", size = 1.6) +
-  facet_wrap(~ parameter, scales = "free", ncol = 2) +
-  labs(x = "Coefficient (link scale)", y = NULL) +
-  theme_minimal(base_size = 10) +
-  theme(strip.text = element_text(face = "bold"))
-```
-
 ```{r scoring_setup, eval = has_scored, include = FALSE}
 flag_thresh <- attr(scored, "flag_threshold")
 filt_method <- attr(scored, "filter_method")
@@ -289,7 +342,7 @@ n_flagged   <- sum(scored$flag_low %in% TRUE)
 ```
 
 ```{r scoring_header, eval = has_scored, results = "asis"}
-cat("# 6. Scoring summary\n\n")
+cat("# 5. Scoring summary\n\n")
 cat(sprintf("- Filter method: **%s**\n", filt_method))
 cat(sprintf("- Threshold:     **%g**\n", threshold))
 cat(sprintf("- Residual cut:  RQR < %.3f\n", flag_thresh))
@@ -307,7 +360,24 @@ ggplot(scored[!is.na(scored$rqr), ], aes(x = rqr)) +
 ```
 
 ```{r flags_header, eval = has_scored, results = "asis"}
-cat("# 7. Where flags landed\n\n")
+cat("# 6. Where flags landed\n\n")
+```
+
+```{r flags_by_niso_table, eval = has_scored}
+flag_by_niso <- scored |>
+  dplyr::filter(!is.na(.data$rqr)) |>
+  dplyr::group_by(.data$n_isoforms) |>
+  dplyr::summarise(
+    n_scored  = dplyr::n(),
+    n_flagged = sum(.data$flag_low %in% TRUE),
+    pct       = round(100 * mean(.data$flag_low %in% TRUE), 2),
+    .groups   = "drop"
+  ) |>
+  dplyr::arrange(.data$n_isoforms)
+knitr::kable(flag_by_niso,
+  caption = paste("Per n_isoforms: scored count, flagged count, and",
+                  "% flagged. A 0 in n_flagged means CALMeR did not",
+                  "flag any reads at that isoform count."))
 ```
 
 ```{r flags_heatmap, eval = has_scored, fig.height = 5, fig.cap = "Flag rate (% reads flagged) by n_isoforms x pct_covered."}

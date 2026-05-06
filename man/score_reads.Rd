@@ -61,14 +61,14 @@ assigned \code{rqr = NA} and \code{flag_low = FALSE} (i.e. retained by default).
 \examples{
 ex       <- calmer_example_data()
 features <- extract_features(ex$bam, ex$gtf, ex$fasta)
+clean    <- clean_features(features)
 fit <- fit_beinf(
-  features, n = 100,
+  clean, n = 1000,
   formula       = y ~ n_isoforms_sc + tx_length_sc + gc_content_sc + pct_covered_sc,
   sigma_formula = ~ 1, nu_formula = ~ 1, tau_formula = ~ 1
 )
 scored <- score_reads(features, fit,
                       filter_method = "mad", threshold = -3)
 table(scored$flag_low)
-unlink(ex$dir, recursive = TRUE)
 
 }
