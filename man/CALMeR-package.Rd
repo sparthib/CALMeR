@@ -34,7 +34,7 @@ Useful links:
 
 }
 \author{
-\strong{Maintainer}: Sowmya Parthiban \email{your.email@example.com}
+\strong{Maintainer}: Sowmya Parthiban \email{sparthi1@jhu.edu}
 
 }
 \keyword{internal}

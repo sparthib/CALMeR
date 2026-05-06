@@ -12,11 +12,7 @@ vignette: >
 ---
 
 ```{r setup, include = FALSE}
-knitr::opts_chunk$set(
-  collapse = TRUE,
-  comment  = "#>",
-  eval     = FALSE   # examples shown for documentation; require user data
-)
+knitr::opts_chunk$set(collapse = TRUE, comment = "#>")
 ```
 
 # Overview
@@ -24,8 +20,8 @@ knitr::opts_chunk$set(
 `CALMeR` (Context-Aware Long-read MAPQ Rescuer) flags reads in long-read
 transcriptome BAM files whose MAPQ is anomalously low *given* their
 transcript context. It fits a Beta-Inflated (BEINF) regression model on a
-sampled subset of reads, computes randomized quantile residuals on the full
-table, and writes a filtered BAM plus a TSV of flagged reads.
+sampled subset of reads, computes randomized quantile residuals on the
+full table, and writes a filtered BAM plus a TSV of flagged reads.
 
 The motivation: a uniform MAPQ threshold (e.g. `samtools view -q 30`)
 disproportionately discards reads from highly multi-isoform genes,
@@ -34,58 +30,40 @@ are low quality but because these transcript-level properties
 systematically suppress MAPQ. CALMeR conditions on transcript context to
 distinguish noise from biology.
 
-# Installation
+# Pipeline
 
-```{r install}
-# CRAN deps
-install.packages(c("dplyr", "readr", "ggplot2", "patchwork",
-                   "data.table", "withr", "gamlss", "gamlss.dist"))
+The standard pipeline is six steps; each function is one stage:
 
-# Bioconductor deps
-if (!requireNamespace("BiocManager", quietly = TRUE)) {
-    install.packages("BiocManager")
-}
-BiocManager::install(c("Rsamtools", "GenomicAlignments",
-                       "rtracklayer", "Biostrings", "S4Vectors"))
+1. `extract_features()` — read the BAM + GTF + transcriptome FASTA, build a
+   per-read feature table (MAPQ, alignment length, transcript length,
+   isoform count per gene, GC content, percent transcript covered).
+2. `clean_features()` — apply standard pre-fit filters (primary alignments
+   only, n_isoforms cap, GC range, length range).
+3. `fit_beinf()` — fit a BEINF regression on a sampled subset.
+4. `score_reads()` — compute randomized quantile residuals for every read
+   and flag those whose RQR falls in the lower tail.
+5. `filter_bam()` — write a filtered BAM (flagged reads removed) + a TSV
+   of flagged reads with their feature values and residuals.
+6. `calmer_report()` — render an HTML or PDF diagnostic report.
 
-# CALMeR (from GitHub for now; Bioconductor submission in progress)
-# remotes::install_github("sparthib/CALMeR")
-```
+A typical end-to-end call (requires a BAM, GTF, and transcriptome FASTA;
+see `?extract_features` for inputs):
 
-# End-to-end example
-
-The standard pipeline is six steps. Each function corresponds to one stage:
-
-```{r workflow}
+```{r workflow, eval = FALSE}
 library(CALMeR)
 
 bam   <- "sample.sorted.bam"
 gtf   <- "gencode.v46.gtf"
 fasta <- "transcripts.fa"
 
-# 1. Per-read features (MAPQ, alignment_length, plus per-transcript
-#    annotation features: tx_length, n_isoforms, gc_content, pct_covered).
 features <- extract_features(bam, gtf, fasta)
-
-# 2. Standard pre-fit cleanup (primary alignments only, n_isoforms cap,
-#    GC range, length range).
 clean    <- clean_features(features)
-
-# 3. Fit BEINF regression on a sample of training reads.
 fit      <- fit_beinf(clean, n = 50000, seed = 42)
-
-# 4. Score every read with a randomized quantile residual (RQR);
-#    flag reads whose RQR falls below median - 3 * MAD by default.
 scored   <- score_reads(features, fit,
                          filter_method = "mad", threshold = -3)
-
-# 5. Write a filtered BAM (flagged reads removed) + a TSV of flagged
-#    reads with their feature values and residuals.
 filt     <- filter_bam(bam, scored,
                         out_bam = "sample_filtered.bam",
                         out_tsv = "sample_flagged.tsv.gz")
-
-# 6. Render a diagnostic report (HTML or PDF).
 calmer_report(fit, scored, out_file = "sample_report.html",
               format = "html", sample_name = "sample")
 ```
@@ -95,23 +73,55 @@ calmer_report(fit, scored, out_file = "sample_report.html",
 When a transcript has paralogs (sequence-similar transcripts on different
 genes), reads from that transcript may be ambiguously assigned even at
 moderate MAPQ. `make_paralog_table()` computes per-transcript paralog
-status from a `minimap2` self-alignment of the transcriptome FASTA, and
-the resulting table can be joined into `extract_features()`:
+status from a `minimap2` self-alignment of the transcriptome FASTA.
 
-```{r paralog}
-# One-time per annotation: precompute paralog status. Caches the PAF for
-# reuse so subsequent calls skip the alignment step.
+The example below runs end-to-end on synthetic GTF + PAF inputs, so it
+exercises the parser without requiring any external data:
+
+```{r paralog-runnable}
+library(CALMeR)
+
+td <- tempfile("calmer_vignette_")
+dir.create(td)
+
+# Tiny GTF: tx1 on gene1, tx2 on gene2, tx3 on gene1.
+gtf_path <- file.path(td, "ex.gtf")
+writeLines(c(
+    paste("chr1", "ex", "transcript", 1, 100, ".", "+", ".",
+          'gene_id "gene1"; transcript_id "tx1";', sep = "\t"),
+    paste("chr1", "ex", "transcript", 1, 200, ".", "+", ".",
+          'gene_id "gene2"; transcript_id "tx2";', sep = "\t"),
+    paste("chr1", "ex", "transcript", 1, 100, ".", "+", ".",
+          'gene_id "gene1"; transcript_id "tx3";', sep = "\t")
+), gtf_path)
+
+# Stub FASTA (only checked for existence; not parsed by make_paralog_table).
+fa_path <- file.path(td, "ex.fa")
+writeLines(c(">tx1", "ACGT", ">tx2", "ACGT", ">tx3", "ACGT"), fa_path)
+
+# Pre-built PAF row: tx1 ~ tx2 at 90% identity, full query coverage.
+paf_path <- file.path(td, "ex.paf")
+writeLines(paste("tx1", 100, 0, 100, "+", "tx2", 200, 0, 100,
+                 90, 100, 60, sep = "\t"),
+           paf_path)
+
 paralog <- make_paralog_table(
-    fasta    = fasta,
-    gtf      = gtf,
-    paf_path = "txome_self_aln.paf",   # cache PAF for reuse
-    threads  = 8
+    fasta    = fa_path,
+    gtf      = gtf_path,
+    paf_path = paf_path
 )
+paralog
+```
 
-# Per sample: extract features with paralog status joined.
+In production you would compute the PAF once per annotation by running
+`minimap2` self-alignment of the transcriptome FASTA. `make_paralog_table`
+will invoke `minimap2` automatically (declared via `SystemRequirements`)
+when no PAF is supplied; otherwise it parses the cached PAF.
+
+The resulting table is then joined into `extract_features()`:
+
+```{r paralog-pipeline, eval = FALSE}
 features <- extract_features(bam, gtf, fasta, paralog_table = paralog)
-
-# Fit BEINF including paralog identity as a fifth predictor.
 fit <- fit_beinf(
     features,
     predictors = c("n_isoforms", "tx_length", "gc_content",
@@ -119,13 +129,8 @@ fit <- fit_beinf(
 )
 ```
 
-`make_paralog_table()` calls `minimap2` via `system2()` when a PAF doesn't
-already exist; the dependency is declared in `SystemRequirements`. If
-you supply a precomputed PAF (or a precomputed paralog TSV), no external
-tool is needed at runtime.
-
 # Session info
 
-```{r session, eval = TRUE}
+```{r session}
 sessionInfo()
 ```

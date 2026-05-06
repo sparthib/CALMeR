@@ -55,15 +55,10 @@ Filters (in order):
 }
 }
 \examples{
-\donttest{
-features <- extract_features(bam, gtf, fasta)
+ex       <- calmer_example_data()
+features <- extract_features(ex$bam, ex$gtf, ex$fasta)
 clean    <- clean_features(features)
-# Or with custom thresholds:
-clean    <- clean_features(features,
-                           max_n_isoforms  = 20,
-                           gc_range        = c(20, 80),
-                           tx_length_range = NULL)  # disable
-fit      <- fit_beinf(clean)
-}
+nrow(features); nrow(clean)
+unlink(ex$dir, recursive = TRUE)
 
 }

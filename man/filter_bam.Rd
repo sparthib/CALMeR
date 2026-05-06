@@ -36,10 +36,18 @@ alignment in \code{\link[=score_reads]{score_reads()}}; if a read's primary alig
 flagged, the whole read is dropped.
 }
 \examples{
-\donttest{
-filter_bam(bam, scored,
-           out_bam = "filtered.bam",
-           out_tsv = "flagged.tsv.gz")
-}
+ex       <- calmer_example_data()
+features <- extract_features(ex$bam, ex$gtf, ex$fasta)
+fit <- fit_beinf(
+  features, n = 100,
+  formula       = y ~ n_isoforms_sc + tx_length_sc + gc_content_sc + pct_covered_sc,
+  sigma_formula = ~ 1, nu_formula = ~ 1, tau_formula = ~ 1
+)
+scored <- score_reads(features, fit, filter_method = "mad", threshold = -3)
+filt <- filter_bam(ex$bam, scored,
+                   out_bam = file.path(ex$dir, "filtered.bam"),
+                   out_tsv = file.path(ex$dir, "flagged.tsv.gz"))
+filt$n_alignments_kept
+unlink(ex$dir, recursive = TRUE)
 
 }

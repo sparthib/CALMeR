@@ -43,13 +43,10 @@
 #'   plus any columns supplied via `paralog_table`.
 #'
 #' @examples
-#' \donttest{
-#' features <- extract_features(
-#'   bam   = "sample.sorted.bam",
-#'   gtf   = "gencode.v44.gtf",
-#'   fasta = "transcripts.fa"
-#' )
-#' }
+#' ex <- calmer_example_data()
+#' features <- extract_features(ex$bam, ex$gtf, ex$fasta)
+#' head(features)
+#' unlink(ex$dir, recursive = TRUE)
 #'
 #' @importFrom Rsamtools scanBam ScanBamParam scanBamFlag indexBam
 #' @importFrom GenomicAlignments cigarWidthAlongQuerySpace

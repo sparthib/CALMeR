@@ -59,12 +59,16 @@ Reads with \code{NA} in any required predictor are kept in the output but
 assigned \code{rqr = NA} and \code{flag_low = FALSE} (i.e. retained by default).
 }
 \examples{
-\donttest{
-features <- extract_features(bam, gtf, fasta)
-clean    <- clean_features(features)
-fit      <- fit_beinf(clean)
-scored   <- score_reads(features, fit,
-                        filter_method = "mad", threshold = -3)
-}
+ex       <- calmer_example_data()
+features <- extract_features(ex$bam, ex$gtf, ex$fasta)
+fit <- fit_beinf(
+  features, n = 100,
+  formula       = y ~ n_isoforms_sc + tx_length_sc + gc_content_sc + pct_covered_sc,
+  sigma_formula = ~ 1, nu_formula = ~ 1, tau_formula = ~ 1
+)
+scored <- score_reads(features, fit,
+                      filter_method = "mad", threshold = -3)
+table(scored$flag_low)
+unlink(ex$dir, recursive = TRUE)
 
 }

@@ -50,23 +50,14 @@
 #' tool is not required at runtime.
 #'
 #' @examples
-#' \donttest{
+#' ex      <- calmer_example_data()
 #' paralog <- make_paralog_table(
-#'   fasta    = "transcripts.fa",
-#'   gtf      = "gencode.v46.gtf",
-#'   paf_path = "txome_self_aln.paf",
-#'   threads  = 8
+#'   fasta    = ex$fasta,
+#'   gtf      = ex$gtf,
+#'   paf_path = ex$paf
 #' )
-#' features <- extract_features(
-#'   bam, gtf, fasta,
-#'   paralog_table = paralog
-#' )
-#' fit <- fit_beinf(
-#'   features,
-#'   predictors = c("n_isoforms", "tx_length", "gc_content",
-#'                  "pct_covered", "max_pct_id")
-#' )
-#' }
+#' head(paralog)
+#' unlink(ex$dir, recursive = TRUE)
 #'
 #' @importFrom rtracklayer import
 #' @importFrom data.table fread
