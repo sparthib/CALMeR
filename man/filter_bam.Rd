@@ -36,7 +36,7 @@ alignment in \code{\link[=score_reads]{score_reads()}}; if a read's primary alig
 flagged, the whole read is dropped.
 }
 \examples{
-\dontrun{
+\donttest{
 filter_bam(bam, scored,
            out_bam = "filtered.bam",
            out_tsv = "flagged.tsv.gz")

@@ -18,4 +18,8 @@
 #' }
 #'
 #' @keywords internal
+#'
+#' @importFrom ggplot2 ggplot aes geom_histogram geom_point geom_line
+#'   geom_density geom_abline labs theme_minimal facet_wrap
+#' @importFrom patchwork wrap_plots
 "_PACKAGE"

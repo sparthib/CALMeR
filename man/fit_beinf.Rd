@@ -67,7 +67,7 @@ caller's responsibility — pass an already-filtered \code{features} data
 frame.
 }
 \examples{
-\dontrun{
+\donttest{
 features <- extract_features(bam, gtf, fasta)
 fit      <- fit_beinf(features, n = 50000, seed = 42)
 }

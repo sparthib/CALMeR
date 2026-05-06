@@ -10,7 +10,8 @@ extract_features(
   fasta,
   gene_types = NULL,
   extra_seqnames = NULL,
-  include_secondary = FALSE
+  include_secondary = FALSE,
+  paralog_table = NULL
 )
 }
 \arguments{
@@ -30,11 +31,21 @@ chromosomes such as \code{"SIRVomeERCCome"} or \code{"chrIS"}).}
 
 \item{include_secondary}{Logical; if \code{FALSE} (default), secondary
 alignments are excluded.}
+
+\item{paralog_table}{Optional. Either a data frame produced by
+\code{\link[=make_paralog_table]{make_paralog_table()}} or a path to a TSV with the same columns. If
+supplied, its non-key columns (everything except \code{transcript_id} and
+\code{gene_id}) are joined into the per-read table by \code{transcript_id},
+with the same version-strip fallback used for the GTF/FASTA join.
+Numeric columns missing for a transcript are filled with 0; logical
+columns are filled with \code{FALSE}. Useful for adding \code{max_pct_id} or
+\verb{has_paralog_*} as additional context predictors for \code{\link[=fit_beinf]{fit_beinf()}}.}
 }
 \value{
 A data.frame with one row per alignment containing
 \code{read_id}, \code{transcript_id}, \code{MAPQ}, \code{alignment_length}, \code{aln_type},
-\code{tx_length}, \code{n_exons}, \code{n_isoforms}, \code{gc_content}, \code{pct_covered}.
+\code{tx_length}, \code{n_exons}, \code{n_isoforms}, \code{gc_content}, \code{pct_covered},
+plus any columns supplied via \code{paralog_table}.
 }
 \description{
 Reads a transcriptome-aligned BAM file and joins per-read alignment
@@ -56,7 +67,7 @@ full transcript ID (including version suffix), a fallback match is
 attempted with the version stripped.
 }
 \examples{
-\dontrun{
+\donttest{
 features <- extract_features(
   bam   = "sample.sorted.bam",
   gtf   = "gencode.v44.gtf",

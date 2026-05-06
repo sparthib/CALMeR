@@ -4,7 +4,13 @@
 \alias{calmer_report}
 \title{Render the CALMeR diagnostic report}
 \usage{
-calmer_report(fit, scored = NULL, out_file, format = c("pdf", "html"))
+calmer_report(
+  fit,
+  scored = NULL,
+  out_file,
+  format = c("pdf", "html"),
+  sample_name = NULL
+)
 }
 \arguments{
 \item{fit}{Object returned by \code{\link[=fit_beinf]{fit_beinf()}}.}
@@ -14,6 +20,8 @@ calmer_report(fit, scored = NULL, out_file, format = c("pdf", "html"))
 \item{out_file}{Path to the rendered report.}
 
 \item{format}{Either \code{"pdf"} (default) or \code{"html"}.}
+
+\item{sample_name}{Optional string displayed in the report title.}
 }
 \value{
 Invisibly, the absolute path to the rendered file.
@@ -29,15 +37,15 @@ Sections:
 \item Training summary (predictor distributions, MAPQ histogram).
 \item Model fit (formulas, EDFs, pseudo-R^2).
 \item Residual diagnostics (global QQ + density vs N(0,1), RQR
-density faceted by \code{n_isoforms}).
-\item Partial effects for all four BEINF parameters.
-\item Calibration of P(MAPQ = 0) and P(MAPQ = 60).
+density faceted by each predictor's quantile bins).
+\item Partial effects on \eqn{E[\mathrm{MAPQ}]}.
+\item Coefficient forest plot for all BEINF parameters.
 \item Scoring summary — only if \code{scored} is supplied.
 \item Where flags landed — only if \code{scored} is supplied.
 }
 }
 \examples{
-\dontrun{
+\donttest{
 calmer_report(fit, scored, out_file = "report.pdf")
 }
 

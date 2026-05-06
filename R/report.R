@@ -10,7 +10,7 @@
 #'   \item Model fit (formulas, EDFs, pseudo-R^2).
 #'   \item Residual diagnostics (global QQ + density vs N(0,1), RQR
 #'         density faceted by each predictor's quantile bins).
-#'   \item Partial effects on E[MAPQ].
+#'   \item Partial effects on \eqn{E[\mathrm{MAPQ}]}.
 #'   \item Coefficient forest plot for all BEINF parameters.
 #'   \item Scoring summary — only if `scored` is supplied.
 #'   \item Where flags landed — only if `scored` is supplied.
@@ -25,7 +25,7 @@
 #' @return Invisibly, the absolute path to the rendered file.
 #'
 #' @examples
-#' \dontrun{
+#' \donttest{
 #' calmer_report(fit, scored, out_file = "report.pdf")
 #' }
 #'

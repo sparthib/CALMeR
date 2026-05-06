@@ -1,0 +1,131 @@
+---
+title: "Introduction to CALMeR"
+author: "Sowmya Parthiban"
+output:
+  BiocStyle::html_document:
+    toc: true
+    toc_float: true
+vignette: >
+  %\VignetteIndexEntry{Introduction to CALMeR}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+---
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(
+  collapse = TRUE,
+  comment  = "#>",
+  eval     = FALSE   # examples shown for documentation; require user data
+)
+```
+
+# Overview
+
+`CALMeR` (Context-Aware Long-read MAPQ Rescuer) flags reads in long-read
+transcriptome BAM files whose MAPQ is anomalously low *given* their
+transcript context. It fits a Beta-Inflated (BEINF) regression model on a
+sampled subset of reads, computes randomized quantile residuals on the full
+table, and writes a filtered BAM plus a TSV of flagged reads.
+
+The motivation: a uniform MAPQ threshold (e.g. `samtools view -q 30`)
+disproportionately discards reads from highly multi-isoform genes,
+GC-extreme transcripts, and long transcripts — not because the alignments
+are low quality but because these transcript-level properties
+systematically suppress MAPQ. CALMeR conditions on transcript context to
+distinguish noise from biology.
+
+# Installation
+
+```{r install}
+# CRAN deps
+install.packages(c("dplyr", "readr", "ggplot2", "patchwork",
+                   "data.table", "withr", "gamlss", "gamlss.dist"))
+
+# Bioconductor deps
+if (!requireNamespace("BiocManager", quietly = TRUE)) {
+    install.packages("BiocManager")
+}
+BiocManager::install(c("Rsamtools", "GenomicAlignments",
+                       "rtracklayer", "Biostrings", "S4Vectors"))
+
+# CALMeR (from GitHub for now; Bioconductor submission in progress)
+# remotes::install_github("sparthib/CALMeR")
+```
+
+# End-to-end example
+
+The standard pipeline is six steps. Each function corresponds to one stage:
+
+```{r workflow}
+library(CALMeR)
+
+bam   <- "sample.sorted.bam"
+gtf   <- "gencode.v46.gtf"
+fasta <- "transcripts.fa"
+
+# 1. Per-read features (MAPQ, alignment_length, plus per-transcript
+#    annotation features: tx_length, n_isoforms, gc_content, pct_covered).
+features <- extract_features(bam, gtf, fasta)
+
+# 2. Standard pre-fit cleanup (primary alignments only, n_isoforms cap,
+#    GC range, length range).
+clean    <- clean_features(features)
+
+# 3. Fit BEINF regression on a sample of training reads.
+fit      <- fit_beinf(clean, n = 50000, seed = 42)
+
+# 4. Score every read with a randomized quantile residual (RQR);
+#    flag reads whose RQR falls below median - 3 * MAD by default.
+scored   <- score_reads(features, fit,
+                         filter_method = "mad", threshold = -3)
+
+# 5. Write a filtered BAM (flagged reads removed) + a TSV of flagged
+#    reads with their feature values and residuals.
+filt     <- filter_bam(bam, scored,
+                        out_bam = "sample_filtered.bam",
+                        out_tsv = "sample_flagged.tsv.gz")
+
+# 6. Render a diagnostic report (HTML or PDF).
+calmer_report(fit, scored, out_file = "sample_report.html",
+              format = "html", sample_name = "sample")
+```
+
+# Adding paralog status as an additional context predictor
+
+When a transcript has paralogs (sequence-similar transcripts on different
+genes), reads from that transcript may be ambiguously assigned even at
+moderate MAPQ. `make_paralog_table()` computes per-transcript paralog
+status from a `minimap2` self-alignment of the transcriptome FASTA, and
+the resulting table can be joined into `extract_features()`:
+
+```{r paralog}
+# One-time per annotation: precompute paralog status. Caches the PAF for
+# reuse so subsequent calls skip the alignment step.
+paralog <- make_paralog_table(
+    fasta    = fasta,
+    gtf      = gtf,
+    paf_path = "txome_self_aln.paf",   # cache PAF for reuse
+    threads  = 8
+)
+
+# Per sample: extract features with paralog status joined.
+features <- extract_features(bam, gtf, fasta, paralog_table = paralog)
+
+# Fit BEINF including paralog identity as a fifth predictor.
+fit <- fit_beinf(
+    features,
+    predictors = c("n_isoforms", "tx_length", "gc_content",
+                   "pct_covered", "max_pct_id")
+)
+```
+
+`make_paralog_table()` calls `minimap2` via `system2()` when a PAF doesn't
+already exist; the dependency is declared in `SystemRequirements`. If
+you supply a precomputed PAF (or a precomputed paralog TSV), no external
+tool is needed at runtime.
+
+# Session info
+
+```{r session, eval = TRUE}
+sessionInfo()
+```

@@ -37,7 +37,7 @@
 #'   threshold used.
 #'
 #' @examples
-#' \dontrun{
+#' \donttest{
 #' features <- extract_features(bam, gtf, fasta)
 #' clean    <- clean_features(features)
 #' fit      <- fit_beinf(clean)

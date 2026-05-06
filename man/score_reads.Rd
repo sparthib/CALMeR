@@ -28,12 +28,18 @@ For \code{"zscore"}: flag if \code{(rqr - mean(rqr)) / sd(rqr) < threshold}.}
 \item{seed}{Random seed for the uniform draws on point masses.}
 
 \item{primary_only}{Logical; if \code{TRUE} (default) score only primary
-alignments. Secondary alignments inherit \code{flag_low = FALSE}.}
+alignments. Secondary alignments inherit \code{flag_low = FALSE}.
+
+Reads with at least one predictor outside the training-data range
+are marked as \code{out_of_range = TRUE} and not scored, since the
+model's cubic-spline extrapolation is unreliable beyond the
+data it saw during fitting.}
 }
 \value{
 A data frame with the input columns plus \code{mu_p}, \code{sigma_p},
-\code{nu_p}, \code{tau_p}, \code{rqr}, \code{flag_low}, and an integer attribute
-\code{"flag_threshold"} recording the absolute residual threshold used.
+\code{nu_p}, \code{tau_p}, \code{rqr}, \code{flag_low}, \code{out_of_range}, and an
+attribute \code{"flag_threshold"} recording the absolute residual
+threshold used.
 }
 \description{
 For every read in \code{features}, predicts the four BEINF parameters
@@ -53,7 +59,7 @@ Reads with \code{NA} in any required predictor are kept in the output but
 assigned \code{rqr = NA} and \code{flag_low = FALSE} (i.e. retained by default).
 }
 \examples{
-\dontrun{
+\donttest{
 features <- extract_features(bam, gtf, fasta)
 clean    <- clean_features(features)
 fit      <- fit_beinf(clean)

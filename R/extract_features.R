@@ -28,13 +28,22 @@
 #'   chromosomes such as `"SIRVomeERCCome"` or `"chrIS"`).
 #' @param include_secondary Logical; if `FALSE` (default), secondary
 #'   alignments are excluded.
+#' @param paralog_table Optional. Either a data frame produced by
+#'   [make_paralog_table()] or a path to a TSV with the same columns. If
+#'   supplied, its non-key columns (everything except `transcript_id` and
+#'   `gene_id`) are joined into the per-read table by `transcript_id`,
+#'   with the same version-strip fallback used for the GTF/FASTA join.
+#'   Numeric columns missing for a transcript are filled with 0; logical
+#'   columns are filled with `FALSE`. Useful for adding `max_pct_id` or
+#'   `has_paralog_*` as additional context predictors for [fit_beinf()].
 #'
 #' @return A data.frame with one row per alignment containing
 #'   `read_id`, `transcript_id`, `MAPQ`, `alignment_length`, `aln_type`,
-#'   `tx_length`, `n_exons`, `n_isoforms`, `gc_content`, `pct_covered`.
+#'   `tx_length`, `n_exons`, `n_isoforms`, `gc_content`, `pct_covered`,
+#'   plus any columns supplied via `paralog_table`.
 #'
 #' @examples
-#' \dontrun{
+#' \donttest{
 #' features <- extract_features(
 #'   bam   = "sample.sorted.bam",
 #'   gtf   = "gencode.v44.gtf",
@@ -55,7 +64,8 @@ extract_features <- function(bam,
                              fasta,
                              gene_types        = NULL,
                              extra_seqnames    = NULL,
-                             include_secondary = FALSE) {
+                             include_secondary = FALSE,
+                             paralog_table     = NULL) {
   stopifnot(
     file.exists(bam),
     file.exists(gtf),
@@ -73,9 +83,17 @@ extract_features <- function(bam,
     NA_real_
   )
 
-  reads_df[, c("read_id", "transcript_id", "MAPQ", "alignment_length",
-               "aln_type", "tx_length", "n_exons", "n_isoforms",
-               "gc_content", "pct_covered")]
+  base_cols <- c("read_id", "transcript_id", "MAPQ", "alignment_length",
+                 "aln_type", "tx_length", "n_exons", "n_isoforms",
+                 "gc_content", "pct_covered")
+
+  if (!is.null(paralog_table)) {
+    reads_df  <- .join_paralog_table(reads_df, paralog_table)
+    extra_cols <- setdiff(names(reads_df), base_cols)
+    return(reads_df[, c(base_cols, extra_cols), drop = FALSE])
+  }
+
+  reads_df[, base_cols, drop = FALSE]
 }
 
 # Internal: build per-transcript lookup from GTF + FASTA.
@@ -189,4 +207,59 @@ extract_features <- function(bam,
   }
 
   out
+}
+
+# Internal: join a paralog table onto reads_df by transcript_id, with the
+# same version-strip fallback used elsewhere. Numeric NAs -> 0;
+# logical NAs -> FALSE.
+.join_paralog_table <- function(reads_df, paralog_table) {
+  if (is.character(paralog_table) && length(paralog_table) == 1L) {
+    if (!file.exists(paralog_table)) {
+      stop("paralog_table path does not exist: ", paralog_table,
+           call. = FALSE)
+    }
+    paralog_table <- utils::read.delim(paralog_table, sep = "\t",
+                                       stringsAsFactors = FALSE)
+  }
+  if (!is.data.frame(paralog_table) ||
+      !"transcript_id" %in% names(paralog_table)) {
+    stop("paralog_table must be a data frame with a 'transcript_id' column ",
+         "(or a path to a TSV with the same).", call. = FALSE)
+  }
+
+  paralog_cols <- setdiff(names(paralog_table), c("transcript_id", "gene_id"))
+  if (length(paralog_cols) == 0L) {
+    return(reads_df)
+  }
+
+  reads_df <- dplyr::left_join(
+    reads_df,
+    paralog_table[, c("transcript_id", paralog_cols), drop = FALSE],
+    by = "transcript_id"
+  )
+
+  unmatched <- is.na(reads_df[[paralog_cols[1]]])
+  if (any(unmatched)) {
+    paralog_nv <- paralog_table |>
+      dplyr::mutate(
+        transcript_id_nv = sub("\\.\\d+$", "", .data$transcript_id)
+      ) |>
+      dplyr::distinct(.data$transcript_id_nv, .keep_all = TRUE)
+    reads_df$transcript_id_nv <- sub("\\.\\d+$", "", reads_df$transcript_id)
+    fb <- paralog_nv[match(reads_df$transcript_id_nv[unmatched],
+                           paralog_nv$transcript_id_nv), , drop = FALSE]
+    for (col in paralog_cols) {
+      reads_df[[col]][unmatched] <- fb[[col]]
+    }
+    reads_df$transcript_id_nv <- NULL
+  }
+
+  for (col in paralog_cols) {
+    if (is.numeric(reads_df[[col]])) {
+      reads_df[[col]][is.na(reads_df[[col]])] <- 0
+    } else if (is.logical(reads_df[[col]])) {
+      reads_df[[col]][is.na(reads_df[[col]])] <- FALSE
+    }
+  }
+  reads_df
 }

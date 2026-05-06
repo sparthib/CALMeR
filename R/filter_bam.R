@@ -22,7 +22,7 @@
 #'   `n_alignments_kept`, `n_alignments_removed`, `out_bam`, `out_tsv`.
 #'
 #' @examples
-#' \dontrun{
+#' \donttest{
 #' filter_bam(bam, scored,
 #'            out_bam = "filtered.bam",
 #'            out_tsv = "flagged.tsv.gz")

@@ -16,12 +16,19 @@ apply_scale <- function(x, params) {
 # mu, sigma, nu, tau: predicted parameter vectors (response scale)
 # seed: optional integer for reproducibility
 compute_rqr_beinf <- function(y, mu, sigma, nu, tau, seed = NULL) {
-  if (!is.null(seed)) set.seed(seed)
   p1        <- tau / (1 + nu + tau)
   F_y       <- gamlss.dist::pBEINF(y, mu = mu, sigma = sigma, nu = nu, tau = tau)
   F_y_minus <- ifelse(y == 0, 0,
                       ifelse(y == 1, 1 - p1, F_y))
-  u <- stats::runif(length(y), min = F_y_minus, max = F_y)
+  # Bioconductor flags set.seed() in package code; with_seed() restores
+  # the user's RNG state when the block exits.
+  u <- if (is.null(seed)) {
+    stats::runif(length(y), min = F_y_minus, max = F_y)
+  } else {
+    withr::with_seed(seed,
+      stats::runif(length(y), min = F_y_minus, max = F_y)
+    )
+  }
   stats::qnorm(u)
 }
 

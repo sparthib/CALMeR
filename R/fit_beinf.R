@@ -41,7 +41,7 @@
 #' }
 #'
 #' @examples
-#' \dontrun{
+#' \donttest{
 #' features <- extract_features(bam, gtf, fasta)
 #' fit      <- fit_beinf(features, n = 50000, seed = 42)
 #' }
@@ -75,9 +75,13 @@ fit_beinf <- function(features,
     stop("No primary alignments (aln_type == 'P') in features.")
   }
 
-  set.seed(seed)
   if (nrow(primary) > n) {
-    primary <- primary[sample(nrow(primary), size = n), , drop = FALSE]
+    # Bioconductor flags set.seed() in package code; with_seed() restores
+    # the user's RNG state when the block exits.
+    primary <- withr::with_seed(
+      seed,
+      primary[sample(nrow(primary), size = n), , drop = FALSE]
+    )
   }
 
   primary <- primary[stats::complete.cases(primary[, c("MAPQ", predictors)]),

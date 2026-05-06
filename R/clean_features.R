@@ -31,7 +31,7 @@
 #' @return A filtered data frame.
 #'
 #' @examples
-#' \dontrun{
+#' \donttest{
 #' features <- extract_features(bam, gtf, fasta)
 #' clean    <- clean_features(features)
 #' # Or with custom thresholds:
