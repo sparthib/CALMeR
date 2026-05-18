@@ -1,40 +1,53 @@
 #' Clean a feature table before fitting
 #'
-#' Applies a set of standard filters commonly used before fitting a CALMeR
-#' BEINF model. Each filter can be relaxed or disabled by passing `NULL`.
-#' Defaults reflect choices made on long-read RNA-seq data; if your study
-#' has different characteristics, override them.
+#' Prepares a feature table for [fit_beinf()] and [score_reads()]. By
+#' default the range-style arguments **clamp** values to their bounds
+#' (so no rows are dropped due to a single out-of-range predictor); set
+#' `mode = "drop"` to fall back to the legacy row-dropping behaviour.
 #'
-#' Filters (in order):
+#' Filters and transforms (in order):
 #' \enumerate{
 #'   \item Drop secondary/supplementary if `primary_only = TRUE`.
 #'   \item Drop rows with `NA` in `MAPQ` or any column listed in
-#'         `required`.
-#'   \item Cap `n_isoforms` at `max_n_isoforms` (drops rows above the cap).
-#'   \item Restrict `gc_content` to the half-open range `gc_range`.
-#'   \item Restrict `tx_length` to the half-open range `tx_length_range`.
+#'         `required` (NA cannot be clamped).
+#'   \item `n_isoforms`: clamp to `[1, max_n_isoforms]` (or drop above
+#'         the cap if `mode = "drop"`).
+#'   \item `gc_content`: clamp to `gc_range` (or drop outside).
+#'   \item `tx_length`:  clamp to `tx_length_range` (or drop outside).
 #' }
+#'
+#' Using `mode = "clamp"` (the default) is recommended when the same
+#' table will be used for both [fit_beinf()] (training) and
+#' [score_reads()] (scoring). Out-of-bound reads get scored against the
+#' fitted model at the boundary value rather than via spline
+#' extrapolation past the training domain.
 #'
 #' @param features Data frame from [extract_features()].
 #' @param primary_only Logical; keep only primary alignments. Default `TRUE`.
-#' @param max_n_isoforms Integer; drop rows with `n_isoforms` above this.
-#'   Default `10`. Set `NULL` to disable.
+#' @param max_n_isoforms Integer upper bound for `n_isoforms`. Default
+#'   `10`. Set `NULL` to disable.
 #' @param gc_range Numeric length-2; inclusive `c(low, high)` percent G+C.
 #'   Default `c(30, 70)`. Set `NULL` to disable.
 #' @param tx_length_range Numeric length-2; inclusive `c(min, max)`
 #'   transcript length in nucleotides. Default `c(100, 10000)`. Set
 #'   `NULL` to disable.
+#' @param mode Either `"clamp"` (default) or `"drop"`. Controls how
+#'   `max_n_isoforms`, `gc_range`, and `tx_length_range` are applied.
 #' @param required Character vector of additional columns that must be
 #'   non-NA. Defaults to the four canonical predictors.
-#' @param verbose Logical; print row counts after each filter.
+#' @param verbose Logical; print row counts (and clamp counts, if any)
+#'   after each step.
 #'
-#' @return A filtered data frame.
+#' @return A data frame with the same rows as `features` minus any
+#'   dropped by `primary_only` / NA / `mode = "drop"` filtering, and
+#'   with predictor columns clamped if `mode = "clamp"`.
 #'
 #' @examples
 #' ex       <- calmer_example_data()
 #' features <- extract_features(ex$bam, ex$gtf, ex$fasta)
-#' clean    <- clean_features(features)
+#' clean    <- clean_features(features)         # clamp (default)
 #' nrow(features); nrow(clean)
+#' clean_drop <- clean_features(features, mode = "drop")  # legacy
 #'
 #' @export
 clean_features <- function(features,
@@ -42,13 +55,18 @@ clean_features <- function(features,
                            max_n_isoforms  = 10,
                            gc_range        = c(30, 70),
                            tx_length_range = c(100, 10000),
+                           mode            = c("clamp", "drop"),
                            required        = c("n_isoforms", "tx_length",
                                                "gc_content", "pct_covered"),
                            verbose         = FALSE) {
   stopifnot(is.data.frame(features))
+  mode <- match.arg(mode)
 
   log_step <- function(label, df) {
-    if (verbose) message(sprintf("  %-28s n = %d", label, nrow(df)))
+    if (verbose) message(sprintf("  %-32s n = %d", label, nrow(df)))
+  }
+  log_clamp <- function(label, n) {
+    if (verbose) message(sprintf("  %-32s clamped = %d", label, n))
   }
 
   log_step("input", features)
@@ -67,27 +85,52 @@ clean_features <- function(features,
   log_step("non-NA predictors", features)
 
   if (!is.null(max_n_isoforms) && "n_isoforms" %in% names(features)) {
-    features <- features[features$n_isoforms <= max_n_isoforms, , drop = FALSE]
-    log_step(sprintf("n_isoforms <= %d", max_n_isoforms), features)
+    if (mode == "clamp") {
+      n_hit <- sum(features$n_isoforms > max_n_isoforms, na.rm = TRUE)
+      features$n_isoforms <- pmin(features$n_isoforms, max_n_isoforms)
+      log_clamp(sprintf("n_isoforms <= %d", max_n_isoforms), n_hit)
+    } else {
+      features <- features[features$n_isoforms <= max_n_isoforms, , drop = FALSE]
+      log_step(sprintf("n_isoforms <= %d", max_n_isoforms), features)
+    }
   }
 
   if (!is.null(gc_range) && "gc_content" %in% names(features)) {
     stopifnot(length(gc_range) == 2L, gc_range[1] <= gc_range[2])
-    features <- features[features$gc_content >= gc_range[1] &
-                         features$gc_content <= gc_range[2], , drop = FALSE]
-    log_step(sprintf("gc_content in [%g, %g]", gc_range[1], gc_range[2]),
-             features)
+    if (mode == "clamp") {
+      n_hit <- sum(features$gc_content < gc_range[1] |
+                   features$gc_content > gc_range[2], na.rm = TRUE)
+      features$gc_content <- pmax(pmin(features$gc_content, gc_range[2]),
+                                  gc_range[1])
+      log_clamp(sprintf("gc_content in [%g, %g]", gc_range[1], gc_range[2]),
+                n_hit)
+    } else {
+      features <- features[features$gc_content >= gc_range[1] &
+                           features$gc_content <= gc_range[2], , drop = FALSE]
+      log_step(sprintf("gc_content in [%g, %g]", gc_range[1], gc_range[2]),
+               features)
+    }
   }
 
   if (!is.null(tx_length_range) && "tx_length" %in% names(features)) {
     stopifnot(length(tx_length_range) == 2L,
               tx_length_range[1] <= tx_length_range[2])
-    features <- features[features$tx_length >= tx_length_range[1] &
-                         features$tx_length <= tx_length_range[2],
-                         , drop = FALSE]
-    log_step(sprintf("tx_length in [%g, %g]",
-                     tx_length_range[1], tx_length_range[2]),
-             features)
+    if (mode == "clamp") {
+      n_hit <- sum(features$tx_length < tx_length_range[1] |
+                   features$tx_length > tx_length_range[2], na.rm = TRUE)
+      features$tx_length <- pmax(pmin(features$tx_length, tx_length_range[2]),
+                                 tx_length_range[1])
+      log_clamp(sprintf("tx_length in [%g, %g]",
+                        tx_length_range[1], tx_length_range[2]),
+                n_hit)
+    } else {
+      features <- features[features$tx_length >= tx_length_range[1] &
+                           features$tx_length <= tx_length_range[2],
+                           , drop = FALSE]
+      log_step(sprintf("tx_length in [%g, %g]",
+                       tx_length_range[1], tx_length_range[2]),
+               features)
+    }
   }
 
   features

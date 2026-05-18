@@ -70,18 +70,22 @@ features <- extract_features(ex$bam, ex$gtf, ex$fasta,
                              paralog_table = paralog)
 clean    <- clean_features(features)
 
-# pb() smoothers on the four context predictors + linear paralog term.
-# Wrapping max_pct_id in pb() is unstable because most transcripts have
-# max_pct_id == 0; the linear form keeps a clean parametric coefficient.
-mu_rhs   <- y ~ pb(n_isoforms_sc) + pb(tx_length_sc) +
-                pb(gc_content_sc) + pb(pct_covered_sc) +
+# pb() smoothers with a coarse 4-knot basis (inter = 4) on the four
+# context predictors, plus a linear paralog term. The default pb() basis
+# (inter = 20) is too flexible for the ~600-read bundled example and
+# produces knot-driven wiggles in the partial-effects panels; a 4-knot
+# basis keeps the smoother shape parameteric-like while still allowing
+# mild non-linearity. On a real run with tens of thousands of reads,
+# drop inter back to its default.
+mu_rhs   <- y ~ pb(n_isoforms_sc,  inter = 4) + pb(tx_length_sc,   inter = 4) +
+                pb(gc_content_sc,  inter = 4) + pb(pct_covered_sc, inter = 4) +
                 max_pct_id_sc
-nu_rhs   <-   ~ pb(n_isoforms_sc) + pb(tx_length_sc) +
-                pb(gc_content_sc) + pb(pct_covered_sc) +
+nu_rhs   <-   ~ pb(n_isoforms_sc,  inter = 4) + pb(tx_length_sc,   inter = 4) +
+                pb(gc_content_sc,  inter = 4) + pb(pct_covered_sc, inter = 4) +
                 max_pct_id_sc
 
 fit <- fit_beinf(
-    clean, n = 1000,
+    clean, n = nrow(clean),
     predictors    = c("n_isoforms", "tx_length", "gc_content",
                       "pct_covered", "max_pct_id"),
     formula       = mu_rhs,
@@ -92,6 +96,47 @@ fit <- fit_beinf(
 
 scored <- score_reads(features, fit, filter_method = "mad",
                       threshold = -3)
+```
+
+# Filtered outputs
+
+`filter_bam()` writes a filtered BAM (flagged reads removed) and a
+gzipped TSV listing the flagged reads with their feature values and
+residuals. Internal scaled-predictor columns (`*_sc`) are dropped from
+the TSV — the file keeps the columns a user would actually inspect.
+
+```{r filter}
+filt <- filter_bam(
+    bam     = ex$bam,
+    scored  = scored,
+    out_bam = tempfile(fileext = ".bam"),
+    out_tsv = tempfile(fileext = ".tsv.gz")
+)
+filt$out_tsv
+```
+
+```{r filter-table, results = "asis", echo = FALSE}
+flagged_tbl <- readr::read_tsv(filt$out_tsv, show_col_types = FALSE)
+cat('
+<style>
+.calmer-flagged-tbl { overflow-x: auto; margin: 1em 0; }
+.calmer-flagged-tbl table { border-collapse: collapse; font-size: 0.9em; }
+.calmer-flagged-tbl th, .calmer-flagged-tbl td {
+    padding: 6px 14px;
+    white-space: nowrap;
+    border-bottom: 1px solid #eee;
+}
+.calmer-flagged-tbl th { background: #f5f5f5; text-align: left; }
+.calmer-flagged-tbl caption { caption-side: top; text-align: left; font-style: italic; padding: 4px 0; }
+</style>
+<div class="calmer-flagged-tbl">
+')
+print(knitr::kable(
+    flagged_tbl, format = "html",
+    caption = sprintf("Flagged reads (%d total, all %d columns shown — scroll horizontally).",
+                      nrow(flagged_tbl), ncol(flagged_tbl))
+))
+cat("\n</div>\n")
 ```
 
 # Diagnostic report (rendered inline)

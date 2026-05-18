@@ -10,6 +10,7 @@ clean_features(
   max_n_isoforms = 10,
   gc_range = c(30, 70),
   tx_length_range = c(100, 10000),
+  mode = c("clamp", "drop"),
   required = c("n_isoforms", "tx_length", "gc_content", "pct_covered"),
   verbose = FALSE
 )
@@ -19,8 +20,8 @@ clean_features(
 
 \item{primary_only}{Logical; keep only primary alignments. Default \code{TRUE}.}
 
-\item{max_n_isoforms}{Integer; drop rows with \code{n_isoforms} above this.
-Default \code{10}. Set \code{NULL} to disable.}
+\item{max_n_isoforms}{Integer upper bound for \code{n_isoforms}. Default
+\code{10}. Set \code{NULL} to disable.}
 
 \item{gc_range}{Numeric length-2; inclusive \code{c(low, high)} percent G+C.
 Default \code{c(30, 70)}. Set \code{NULL} to disable.}
@@ -29,35 +30,49 @@ Default \code{c(30, 70)}. Set \code{NULL} to disable.}
 transcript length in nucleotides. Default \code{c(100, 10000)}. Set
 \code{NULL} to disable.}
 
+\item{mode}{Either \code{"clamp"} (default) or \code{"drop"}. Controls how
+\code{max_n_isoforms}, \code{gc_range}, and \code{tx_length_range} are applied.}
+
 \item{required}{Character vector of additional columns that must be
 non-NA. Defaults to the four canonical predictors.}
 
-\item{verbose}{Logical; print row counts after each filter.}
+\item{verbose}{Logical; print row counts (and clamp counts, if any)
+after each step.}
 }
 \value{
-A filtered data frame.
+A data frame with the same rows as \code{features} minus any
+dropped by \code{primary_only} / NA / \code{mode = "drop"} filtering, and
+with predictor columns clamped if \code{mode = "clamp"}.
 }
 \description{
-Applies a set of standard filters commonly used before fitting a CALMeR
-BEINF model. Each filter can be relaxed or disabled by passing \code{NULL}.
-Defaults reflect choices made on long-read RNA-seq data; if your study
-has different characteristics, override them.
+Prepares a feature table for \code{\link[=fit_beinf]{fit_beinf()}} and \code{\link[=score_reads]{score_reads()}}. By
+default the range-style arguments \strong{clamp} values to their bounds
+(so no rows are dropped due to a single out-of-range predictor); set
+\code{mode = "drop"} to fall back to the legacy row-dropping behaviour.
 }
 \details{
-Filters (in order):
+Filters and transforms (in order):
 \enumerate{
 \item Drop secondary/supplementary if \code{primary_only = TRUE}.
 \item Drop rows with \code{NA} in \code{MAPQ} or any column listed in
-\code{required}.
-\item Cap \code{n_isoforms} at \code{max_n_isoforms} (drops rows above the cap).
-\item Restrict \code{gc_content} to the half-open range \code{gc_range}.
-\item Restrict \code{tx_length} to the half-open range \code{tx_length_range}.
+\code{required} (NA cannot be clamped).
+\item \code{n_isoforms}: clamp to \verb{[1, max_n_isoforms]} (or drop above
+the cap if \code{mode = "drop"}).
+\item \code{gc_content}: clamp to \code{gc_range} (or drop outside).
+\item \code{tx_length}:  clamp to \code{tx_length_range} (or drop outside).
 }
+
+Using \code{mode = "clamp"} (the default) is recommended when the same
+table will be used for both \code{\link[=fit_beinf]{fit_beinf()}} (training) and
+\code{\link[=score_reads]{score_reads()}} (scoring). Out-of-bound reads get scored against the
+fitted model at the boundary value rather than via spline
+extrapolation past the training domain.
 }
 \examples{
 ex       <- calmer_example_data()
 features <- extract_features(ex$bam, ex$gtf, ex$fasta)
-clean    <- clean_features(features)
+clean    <- clean_features(features)         # clamp (default)
 nrow(features); nrow(clean)
+clean_drop <- clean_features(features, mode = "drop")  # legacy
 
 }

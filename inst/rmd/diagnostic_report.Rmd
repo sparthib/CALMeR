@@ -368,19 +368,26 @@ flag_by_niso <- scored |>
   dplyr::filter(!is.na(.data$rqr)) |>
   dplyr::group_by(.data$n_isoforms) |>
   dplyr::summarise(
-    n_scored  = dplyr::n(),
-    n_flagged = sum(.data$flag_low %in% TRUE),
-    pct       = round(100 * mean(.data$flag_low %in% TRUE), 2),
-    .groups   = "drop"
+    n_scored          = dplyr::n(),
+    n_flagged         = sum(.data$flag_low %in% TRUE),
+    pct_flagged       = round(100 * mean(.data$flag_low %in% TRUE), 2),
+    median_tx_length  = round(stats::median(.data$tx_length, na.rm = TRUE)),
+    median_gc_content = round(stats::median(.data$gc_content, na.rm = TRUE), 1),
+    pct_paralog_gt50  = if ("max_pct_id" %in% names(scored))
+                          round(100 * mean(.data$max_pct_id > 50, na.rm = TRUE), 1)
+                        else NA_real_,
+    .groups = "drop"
   ) |>
   dplyr::arrange(.data$n_isoforms)
+
 knitr::kable(flag_by_niso,
-  caption = paste("Per n_isoforms: scored count, flagged count, and",
-                  "% flagged. A 0 in n_flagged means CALMeR did not",
-                  "flag any reads at that isoform count."))
+  caption = paste("Per n_isoforms: scored count, flagged count, % flagged,",
+                  "and group-level context (median tx_length, median",
+                  "gc_content, % of reads on transcripts with a paralog",
+                  "at >50% identity)."))
 ```
 
-```{r flags_heatmap, eval = has_scored, fig.height = 5, fig.cap = "Flag rate (% reads flagged) by n_isoforms x pct_covered."}
+```{r flags_heatmap, eval = has_scored, fig.height = 5, fig.cap = "Any flag in cell (orange) vs. none (grey), by n_isoforms x pct_covered bin."}
 pct_breaks <- seq(0, 100, by = 10)
 pct_labels <- paste0(pct_breaks[-length(pct_breaks)], "-", pct_breaks[-1], "%")
 
@@ -392,43 +399,34 @@ hm <- scored |>
   ) |>
   dplyr::filter(!is.na(.data$pct_cov_bin)) |>
   dplyr::group_by(.data$n_isoforms, .data$pct_cov_bin) |>
-  dplyr::summarise(n = dplyr::n(),
-                   pct_flagged = mean(.data$flag_low) * 100,
-                   .groups = "drop")
+  dplyr::summarise(n         = dplyr::n(),
+                   any_flag  = any(.data$flag_low %in% TRUE),
+                   .groups   = "drop") |>
+  dplyr::mutate(flag_status = ifelse(any_flag, "Flagged", "None"))
 
-ggplot(hm, aes(x = factor(n_isoforms), y = pct_cov_bin, fill = pct_flagged)) +
+ggplot(hm, aes(x = factor(n_isoforms), y = pct_cov_bin, fill = flag_status)) +
   geom_tile(color = "white", linewidth = 0.3) +
-  geom_text(aes(label = ifelse(n >= 10,
-                               paste0(round(pct_flagged, 1), "%"), "")),
-            size = 2.2, color = "white") +
-  scale_fill_distiller(palette = "Oranges", direction = 1,
-                       name = "% flagged") +
-  labs(x = "n_isoforms", y = "pct_covered bin") +
+  geom_text(aes(label = ifelse(n >= 1, n, "")),
+            size = 2.4, color = "grey20") +
+  scale_fill_manual(values = c("None"    = "grey85",
+                               "Flagged" = "#D85A30"),
+                    name   = NULL) +
+  labs(x = "n_isoforms", y = "pct_covered bin",
+       subtitle = "Cell labels show the number of scored reads in the bin.") +
   theme_minimal(base_size = 10)
 ```
 
-```{r flag_by_niso, eval = has_scored, fig.height = 4, fig.cap = "Percent flagged by n_isoforms."}
-scored |>
-  dplyr::filter(!is.na(.data$rqr)) |>
-  dplyr::group_by(.data$n_isoforms) |>
-  dplyr::summarise(pct_flagged = mean(.data$flag_low) * 100, .groups = "drop") |>
-  ggplot(aes(x = factor(n_isoforms), y = pct_flagged)) +
-  geom_col(fill = "#D85A30", alpha = 0.85) +
-  geom_text(aes(label = paste0(round(pct_flagged, 1), "%")),
-            vjust = -0.4, size = 3) +
-  scale_y_continuous(expand = expansion(mult = c(0, 0.15))) +
-  labs(x = "n_isoforms", y = "% reads flagged") +
-  theme_minimal()
-```
+```{r mapq_by_flag, eval = has_scored, fig.height = 3.5, fig.cap = "Scored MAPQ distribution. Red rug ticks mark MAPQ values of the flagged reads."}
+scored_ok <- scored |> dplyr::filter(!is.na(.data$rqr))
+flagged   <- scored_ok |> dplyr::filter(.data$flag_low %in% TRUE)
 
-```{r mapq_by_flag, eval = has_scored, fig.height = 4, fig.cap = "MAPQ distribution by flag status."}
-scored |>
-  dplyr::filter(!is.na(.data$rqr)) |>
-  ggplot(aes(x = .data$MAPQ, fill = .data$flag_low)) +
-  geom_density(alpha = 0.4) +
-  scale_fill_manual(values = c("FALSE" = "grey60", "TRUE" = "#D85A30"),
-                    labels = c("FALSE" = "Kept", "TRUE" = "Flagged")) +
-  labs(x = "MAPQ", y = "Density", fill = NULL) +
-  theme_minimal() +
-  theme(legend.position = "bottom")
+ggplot(scored_ok, aes(x = MAPQ)) +
+  geom_histogram(binwidth = 1, fill = "steelblue",
+                 color = "white", alpha = 0.85) +
+  geom_rug(data = flagged, aes(x = MAPQ),
+           inherit.aes = FALSE,
+           color = "#D85A30", linewidth = 0.8, length = unit(0.04, "npc")) +
+  scale_x_continuous(breaks = c(0, 10, 20, 30, 40, 50, 60)) +
+  labs(x = "MAPQ", y = "Count") +
+  theme_minimal()
 ```
