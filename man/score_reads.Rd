@@ -17,7 +17,9 @@ score_reads(
 \item{features}{Data frame from \code{\link[=extract_features]{extract_features()}} (typically the
 full set, not just the training subset).}
 
-\item{fit}{Object returned by \code{\link[=fit_beinf]{fit_beinf()}}.}
+\item{fit}{Either a single \code{calmer_fit} returned by \code{\link[=fit_beinf]{fit_beinf()}},
+or a \code{calmer_suite} returned by \code{\link[=fit_beinf_suite]{fit_beinf_suite()}}. If a suite is
+supplied, the suite's primary fit is used.}
 
 \item{filter_method}{One of \code{"mad"} (default) or \code{"zscore"}.
 For \code{"mad"}: flag if \code{rqr < median(rqr) + threshold * mad(rqr)}.

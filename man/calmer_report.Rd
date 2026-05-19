@@ -13,7 +13,10 @@ calmer_report(
 )
 }
 \arguments{
-\item{fit}{Object returned by \code{\link[=fit_beinf]{fit_beinf()}}.}
+\item{fit}{Either a single \code{calmer_fit} from \code{\link[=fit_beinf]{fit_beinf()}} or a
+\code{calmer_suite} from \code{\link[=fit_beinf_suite]{fit_beinf_suite()}}. When a suite is supplied,
+the model-comparison section is rendered and the suite's primary
+fit drives the per-model diagnostic sections.}
 
 \item{scored}{Optional data frame returned by \code{\link[=score_reads]{score_reads()}}.}
 
@@ -35,7 +38,10 @@ flags landed in the scored data set.
 Sections:
 \enumerate{
 \item Training summary (predictor distributions, MAPQ histogram).
-\item Model fit (formulas, EDFs, pseudo-R^2).
+\item Model comparison — only if a \code{calmer_suite} is supplied.
+AIC / BIC / global EDF / pseudo-R^2 across all fits in the
+suite, side-by-side residual QQ panels.
+\item Model fit for the primary model (formulas, EDFs, pseudo-R^2).
 \item Residual diagnostics (global QQ + density vs N(0,1), RQR
 density faceted by each predictor's quantile bins).
 \item Partial effects on \eqn{E[\mathrm{MAPQ}]}.

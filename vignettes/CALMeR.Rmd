@@ -35,15 +35,27 @@ The standard pipeline is six steps; each function is one stage:
 1. `extract_features()` — read the BAM + GTF + transcriptome FASTA,
    build a per-read feature table (MAPQ, alignment length, transcript
    length, isoform count per gene, GC content, percent transcript
-   covered).
+   covered). Optionally joins paralog context columns (`max_pct_id`,
+   `has_paralog_*`) when `paralog_table = ...` is supplied.
 2. `clean_features()` — apply standard pre-fit filters (primary
-   alignments only, n_isoforms cap, GC range, length range).
-3. `fit_beinf()` — fit a BEINF regression on a sampled subset.
-4. `score_reads()` — compute randomized quantile residuals for every
-   read and flag those whose RQR falls in the lower tail.
-5. `filter_bam()` — write a filtered BAM (flagged reads removed) + a
+   alignments only) and clamp predictor values into specified bounds
+   so the same cleaned table is safe to use for both training and
+   scoring (no spline extrapolation past the trained domain).
+3. `inspect_predictors()` — diagnostic plots of predictor
+   distributions to help pick clamp bounds before fitting.
+4. `fit_beinf()` — fit a single BEINF regression on a sampled subset.
+5. `fit_beinf_suite()` — fit a *suite* of four default BEINF models
+   (penalized B-spline / linear × with / without paralog) for
+   model-comparison reports. The suite's primary fit is used
+   downstream by `score_reads()` and `calmer_report()`.
+6. `score_reads()` — compute randomized quantile residuals for every
+   read and flag those whose RQR falls in the lower tail. Accepts
+   either a single `calmer_fit` or a `calmer_suite`.
+7. `filter_bam()` — write a filtered BAM (flagged reads removed) + a
    TSV of flagged reads with their feature values and residuals.
-6. `calmer_report()` — render an HTML or PDF diagnostic report.
+8. `calmer_report()` — render an HTML or PDF diagnostic report.
+   When passed a `calmer_suite`, includes a model-comparison section
+   with AIC / BIC / EDF / pseudo-R² and side-by-side QQ panels.
 
 # End-to-end pipeline on bundled example data
 

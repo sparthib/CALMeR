@@ -13,6 +13,7 @@ fit_beinf(
   sigma_formula = NULL,
   nu_formula = NULL,
   tau_formula = NULL,
+  n_knots = 5,
   trace = FALSE
 )
 }
@@ -37,6 +38,10 @@ In a custom formula, refer to scaled predictors as
 \item{sigma_formula, nu_formula, tau_formula}{Optional formulas for the
 other BEINF distributional parameters. If \code{NULL}, the same default
 formula is used for each.}
+
+\item{n_knots}{Integer; number of intervals (passed as \code{inter} to
+\code{\link[gamlss:ps]{gamlss::pb()}}) for each penalized B-spline term in the default
+formula. Ignored when a custom \code{formula} is supplied. Default \code{5}.}
 
 \item{trace}{Logical; if \code{TRUE}, print gamlss convergence messages.
 Default \code{FALSE}.}

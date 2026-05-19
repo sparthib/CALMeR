@@ -17,7 +17,9 @@
 #'
 #' @param features Data frame from [extract_features()] (typically the
 #'   full set, not just the training subset).
-#' @param fit Object returned by [fit_beinf()].
+#' @param fit Either a single `calmer_fit` returned by [fit_beinf()],
+#'   or a `calmer_suite` returned by [fit_beinf_suite()]. If a suite is
+#'   supplied, the suite's primary fit is used.
 #' @param filter_method One of `"mad"` (default) or `"zscore"`.
 #'   For `"mad"`: flag if `rqr < median(rqr) + threshold * mad(rqr)`.
 #'   For `"zscore"`: flag if `(rqr - mean(rqr)) / sd(rqr) < threshold`.
@@ -59,8 +61,9 @@ score_reads <- function(features,
                         primary_only  = TRUE) {
   filter_method <- match.arg(filter_method)
 
+  fit <- primary_fit(fit)
   if (!inherits(fit, "calmer_fit")) {
-    stop("`fit` must be a calmer_fit object returned by fit_beinf().")
+    stop("`fit` must be a calmer_fit (or calmer_suite) object.")
   }
   stopifnot(
     is.data.frame(features),

@@ -7,7 +7,10 @@
 #' Sections:
 #' \enumerate{
 #'   \item Training summary (predictor distributions, MAPQ histogram).
-#'   \item Model fit (formulas, EDFs, pseudo-R^2).
+#'   \item Model comparison — only if a `calmer_suite` is supplied.
+#'         AIC / BIC / global EDF / pseudo-R^2 across all fits in the
+#'         suite, side-by-side residual QQ panels.
+#'   \item Model fit for the primary model (formulas, EDFs, pseudo-R^2).
 #'   \item Residual diagnostics (global QQ + density vs N(0,1), RQR
 #'         density faceted by each predictor's quantile bins).
 #'   \item Partial effects on \eqn{E[\mathrm{MAPQ}]}.
@@ -16,7 +19,10 @@
 #'   \item Where flags landed — only if `scored` is supplied.
 #' }
 #'
-#' @param fit Object returned by [fit_beinf()].
+#' @param fit Either a single `calmer_fit` from [fit_beinf()] or a
+#'   `calmer_suite` from [fit_beinf_suite()]. When a suite is supplied,
+#'   the model-comparison section is rendered and the suite's primary
+#'   fit drives the per-model diagnostic sections.
 #' @param scored Optional data frame returned by [score_reads()].
 #' @param out_file Path to the rendered report.
 #' @param format Either `"pdf"` (default) or `"html"`.
@@ -48,12 +54,15 @@ calmer_report <- function(fit,
                           sample_name = NULL) {
   format <- match.arg(format)
 
-  if (!inherits(fit, "calmer_fit")) {
-    stop("`fit` must be a calmer_fit object returned by fit_beinf().")
+  if (!inherits(fit, "calmer_fit") && !inherits(fit, "calmer_suite")) {
+    stop("`fit` must be a calmer_fit (or calmer_suite) object.")
   }
   if (!is.null(scored) && !is.data.frame(scored)) {
     stop("`scored` must be a data frame returned by score_reads(), or NULL.")
   }
+
+  suite <- if (inherits(fit, "calmer_suite")) fit else NULL
+  primary <- primary_fit(fit)
 
   if (!requireNamespace("rmarkdown", quietly = TRUE)) {
     stop("Package 'rmarkdown' is required to render the report.")
@@ -74,7 +83,8 @@ calmer_report <- function(fit,
     input         = template,
     output_format = output_format,
     output_file   = out_file,
-    params        = list(fit         = fit,
+    params        = list(fit         = primary,
+                         suite       = suite,
                          scored      = scored,
                          sample_name = sample_name),
     envir         = new.env(parent = globalenv()),

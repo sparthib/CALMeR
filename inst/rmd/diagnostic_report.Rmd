@@ -15,6 +15,7 @@ output:
     fig_height: 5
 params:
   fit: !r NULL
+  suite: !r NULL
   scored: !r NULL
   sample_name: !r NULL
 ---
@@ -35,11 +36,13 @@ library(dplyr)
 library(gamlss)
 
 fit          <- params$fit
+suite        <- params$suite
 scored       <- params$scored
 training     <- fit$training_data
 scale_params <- fit$scale_params
 predictors   <- fit$predictors
 has_scored   <- !is.null(scored)
+has_suite    <- !is.null(suite) && length(suite) > 1
 
 invisible(stopifnot(inherits(fit, "calmer_fit")))
 ```
@@ -138,54 +141,29 @@ cat("**Pseudo-$R^2$:** ", rsq, "\n", sep = "")
 
 # 2b. Model comparison
 
-Refits on the same training data with two alternative parameterizations:
-**(i)** linear terms in $\mu$, $\nu$, $\tau$ (this is what the user
-supplied if no spline override was given), and **(ii)** penalized
-B-splines with five interior knots in all three. $\sigma$ is held to an
-intercept-only formula in both, since modeling the beta-interior
-precision usually doesn't help on data of this size. AIC, BIC, and
+```{asis, echo = has_suite}
+A suite of BEINF fits is summarised below. The suite includes the four
+canonical defaults — `pb` smoothers on the canonical predictors with
+and without a paralog term, plus the corresponding linear-term
+variants — and optionally a user-supplied fit. AIC, BIC, training EDF
+and gamlss's pseudo-$R^2$ appear in the table; side-by-side QQ panels
+follow. **The primary fit (used downstream by `score_reads()` and the
+sections below) is highlighted.**
+```
+
+```{asis, echo = !has_suite}
+Refits on the same training data with two alternative
+parameterizations: **(i)** linear terms in $\mu$, $\nu$, $\tau$ (this
+is what the user supplied if no spline override was given), and
+**(ii)** penalized B-splines with five interior knots in all three.
+$\sigma$ is held to an intercept-only formula in both. AIC, BIC, and
 gamlss's pseudo-$R^2$ are reported alongside the user-supplied fit.
+For a richer comparison, fit a suite of models with
+`fit_beinf_suite()` and pass it to `calmer_report()`.
+```
 
 ```{r model_comparison_fit, results = "hide"}
-training    <- fit$training_data
-all_preds   <- fit$predictors
-non_paralog <- setdiff(all_preds, "max_pct_id")
-preds_all_sc <- paste0(all_preds,   "_sc")
-preds_np_sc  <- paste0(non_paralog, "_sc")
-
-# Three alternative parameterizations.
-lin_all_rhs <- paste(preds_all_sc, collapse = " + ")
-lin_np_rhs  <- paste(preds_np_sc,  collapse = " + ")
-# pb on every non-paralog predictor + plain linear paralog (if present).
-# Wrapping max_pct_id in pb() is unstable since most transcripts have
-# max_pct_id == 0; the linear form keeps a clean parametric coefficient.
-pb_terms_np <- paste0("pb(", preds_np_sc, ", inter = 5)", collapse = " + ")
-pb_mix_rhs  <- if ("max_pct_id" %in% all_preds) {
-  paste(pb_terms_np, "+ max_pct_id_sc")
-} else {
-  pb_terms_np
-}
-
-fit_silent <- function(mu_rhs, nu_rhs, tau_rhs) {
-  tryCatch(
-    suppressWarnings(gamlss::gamlss(
-      formula       = stats::as.formula(paste("y ~", mu_rhs)),
-      sigma.formula = ~ 1,
-      nu.formula    = stats::as.formula(paste("~", nu_rhs)),
-      tau.formula   = stats::as.formula(paste("~", tau_rhs)),
-      family        = gamlss.dist::BEINF(),
-      data          = training,
-      control       = gamlss::gamlss.control(trace = FALSE)
-    )),
-    error = function(e) NULL
-  )
-}
-
-mod_lin_all <- fit_silent(lin_all_rhs, lin_all_rhs, lin_all_rhs)
-mod_lin_np  <- fit_silent(lin_np_rhs,  lin_np_rhs,  lin_np_rhs)
-mod_pb_mix  <- fit_silent(pb_mix_rhs,  pb_mix_rhs,  pb_mix_rhs)
-
-extract_metrics <- function(m, label) {
+extract_metrics <- function(m, label, is_primary = FALSE) {
   if (is.null(m)) {
     return(data.frame(Model = label, AIC = NA, BIC = NA,
                       df = NA, `Pseudo R^2` = NA,
@@ -193,7 +171,7 @@ extract_metrics <- function(m, label) {
   }
   rsq <- tryCatch(gamlss::Rsq(m), error = function(e) NA_real_)
   data.frame(
-    Model        = label,
+    Model        = if (is_primary) paste0(label, " (primary)") else label,
     AIC          = round(AIC(m), 1),
     BIC          = round(BIC(m), 1),
     df           = round(m$df.fit, 1),
@@ -202,17 +180,82 @@ extract_metrics <- function(m, label) {
   )
 }
 
-cmp_tbl <- dplyr::bind_rows(
-  extract_metrics(fit$fit,     "User-supplied"),
-  extract_metrics(mod_lin_all, "All linear (5 predictors)"),
-  extract_metrics(mod_lin_np,  "All linear (no max_pct_id)"),
-  extract_metrics(mod_pb_mix,  "pb on 4 non-paralog + linear max_pct_id")
-)
+if (has_suite) {
+  primary_name <- attr(suite, "primary")
+  cmp_tbl <- dplyr::bind_rows(lapply(names(suite), function(nm) {
+    extract_metrics(suite[[nm]]$fit, nm, is_primary = (nm == primary_name))
+  }))
+  qq_fits <- suite
+} else {
+  training    <- fit$training_data
+  all_preds   <- fit$predictors
+  non_paralog <- setdiff(all_preds, "max_pct_id")
+  preds_all_sc <- paste0(all_preds,   "_sc")
+  preds_np_sc  <- paste0(non_paralog, "_sc")
+
+  lin_all_rhs <- paste(preds_all_sc, collapse = " + ")
+  lin_np_rhs  <- paste(preds_np_sc,  collapse = " + ")
+  pb_terms_np <- paste0("pb(", preds_np_sc, ", inter = 5)", collapse = " + ")
+  pb_mix_rhs  <- if ("max_pct_id" %in% all_preds) {
+    paste(pb_terms_np, "+ max_pct_id_sc")
+  } else {
+    pb_terms_np
+  }
+
+  fit_silent <- function(mu_rhs, nu_rhs, tau_rhs) {
+    tryCatch(
+      suppressWarnings(gamlss::gamlss(
+        formula       = stats::as.formula(paste("y ~", mu_rhs)),
+        sigma.formula = ~ 1,
+        nu.formula    = stats::as.formula(paste("~", nu_rhs)),
+        tau.formula   = stats::as.formula(paste("~", tau_rhs)),
+        family        = gamlss.dist::BEINF(),
+        data          = training,
+        control       = gamlss::gamlss.control(trace = FALSE)
+      )),
+      error = function(e) NULL
+    )
+  }
+
+  mod_lin_all <- fit_silent(lin_all_rhs, lin_all_rhs, lin_all_rhs)
+  mod_lin_np  <- fit_silent(lin_np_rhs,  lin_np_rhs,  lin_np_rhs)
+  mod_pb_mix  <- fit_silent(pb_mix_rhs,  pb_mix_rhs,  pb_mix_rhs)
+
+  cmp_tbl <- dplyr::bind_rows(
+    extract_metrics(fit$fit,     "user-supplied (primary)", is_primary = TRUE),
+    extract_metrics(mod_lin_all, "linear (all predictors)"),
+    extract_metrics(mod_lin_np,  "linear (no max_pct_id)"),
+    extract_metrics(mod_pb_mix,  "pb on 4 + linear max_pct_id")
+  )
+  qq_fits <- NULL
+}
 ```
 
 ```{r model_comparison_table}
 knitr::kable(cmp_tbl,
              caption = "Model fit metrics on the training data. Lower AIC/BIC and higher pseudo-$R^2$ are better.")
+```
+
+```{r model_comparison_qq, eval = has_suite, fig.height = 3 * ceiling(length(suite) / 2), fig.cap = "Standard-normal QQ plot of randomized quantile residuals on the training set, one panel per suite fit."}
+qq_df <- dplyr::bind_rows(lapply(names(qq_fits), function(nm) {
+  f       <- qq_fits[[nm]]
+  rqr_in  <- tryCatch(
+    suppressWarnings(qnorm(stats::residuals(f$fit, type = "quantile"))),
+    error = function(e) rep(NA_real_, nrow(f$training_data))
+  )
+  data.frame(model = nm, rqr = rqr_in)
+})) |>
+  dplyr::filter(!is.na(rqr))
+
+if (nrow(qq_df) > 0L) {
+  ggplot(qq_df, aes(sample = rqr)) +
+    stat_qq(size = 0.4, alpha = 0.5, colour = "steelblue") +
+    stat_qq_line(colour = "firebrick", linetype = "dashed") +
+    facet_wrap(~ model, ncol = 2, scales = "free") +
+    labs(x = "Theoretical N(0, 1) quantile",
+         y = "Randomized quantile residual") +
+    theme_minimal(base_size = 10)
+}
 ```
 
 # 3. Residual diagnostics
@@ -387,7 +430,7 @@ knitr::kable(flag_by_niso,
                   "at >50% identity)."))
 ```
 
-```{r flags_heatmap, eval = has_scored, fig.height = 5, fig.cap = "Any flag in cell (orange) vs. none (grey), by n_isoforms x pct_covered bin."}
+```{r flags_heatmap, eval = has_scored, fig.height = 5, fig.cap = "Flag rate (% of scored reads flagged) by n_isoforms x pct_covered bin. Cell labels show the absolute number of flagged reads in the bin."}
 pct_breaks <- seq(0, 100, by = 10)
 pct_labels <- paste0(pct_breaks[-length(pct_breaks)], "-", pct_breaks[-1], "%")
 
@@ -399,20 +442,21 @@ hm <- scored |>
   ) |>
   dplyr::filter(!is.na(.data$pct_cov_bin)) |>
   dplyr::group_by(.data$n_isoforms, .data$pct_cov_bin) |>
-  dplyr::summarise(n         = dplyr::n(),
-                   any_flag  = any(.data$flag_low %in% TRUE),
-                   .groups   = "drop") |>
-  dplyr::mutate(flag_status = ifelse(any_flag, "Flagged", "None"))
+  dplyr::summarise(n_scored   = dplyr::n(),
+                   n_flagged  = sum(.data$flag_low %in% TRUE),
+                   .groups    = "drop") |>
+  dplyr::mutate(pct_flagged = 100 * n_flagged / pmax(n_scored, 1))
 
-ggplot(hm, aes(x = factor(n_isoforms), y = pct_cov_bin, fill = flag_status)) +
+ggplot(hm, aes(x = factor(n_isoforms), y = pct_cov_bin, fill = pct_flagged)) +
   geom_tile(color = "white", linewidth = 0.3) +
-  geom_text(aes(label = ifelse(n >= 1, n, "")),
+  geom_text(aes(label = ifelse(n_flagged >= 1,
+                               format(n_flagged, big.mark = ","), "")),
             size = 2.4, color = "grey20") +
-  scale_fill_manual(values = c("None"    = "grey85",
-                               "Flagged" = "#D85A30"),
-                    name   = NULL) +
+  scale_fill_gradient(low = "grey90", high = "#D85A30",
+                      name = "% flagged",
+                      labels = function(v) sprintf("%.2f%%", v)) +
   labs(x = "n_isoforms", y = "pct_covered bin",
-       subtitle = "Cell labels show the number of scored reads in the bin.") +
+       subtitle = "Fill = flag rate per cell; labels = absolute flagged-read count.") +
   theme_minimal(base_size = 10)
 ```
 

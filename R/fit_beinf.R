@@ -26,6 +26,9 @@
 #' @param sigma_formula,nu_formula,tau_formula Optional formulas for the
 #'   other BEINF distributional parameters. If `NULL`, the same default
 #'   formula is used for each.
+#' @param n_knots Integer; number of intervals (passed as `inter` to
+#'   [gamlss::pb()]) for each penalized B-spline term in the default
+#'   formula. Ignored when a custom `formula` is supplied. Default `5`.
 #' @param trace Logical; if `TRUE`, print gamlss convergence messages.
 #'   Default `FALSE`.
 #'
@@ -67,6 +70,7 @@ fit_beinf <- function(features,
                       sigma_formula = NULL,
                       nu_formula    = NULL,
                       tau_formula   = NULL,
+                      n_knots       = 5,
                       trace         = FALSE) {
   call <- match.call()
 
@@ -76,6 +80,7 @@ fit_beinf <- function(features,
     "MAPQ"     %in% names(features),
     is.numeric(n), length(n) == 1L, n > 0,
     is.numeric(seed), length(seed) == 1L,
+    is.numeric(n_knots), length(n_knots) == 1L, n_knots >= 1,
     all(predictors %in% names(features))
   )
 
@@ -108,7 +113,8 @@ fit_beinf <- function(features,
   }
 
   predictors_sc <- paste0(predictors, "_sc")
-  default_rhs <- paste(paste0("pb(", predictors_sc, ", inter = 5)"),
+  default_rhs <- paste(paste0("pb(", predictors_sc,
+                              ", inter = ", n_knots, ")"),
                        collapse = " + ")
   if (is.null(formula))       formula       <- stats::as.formula(paste("y ~", default_rhs))
   if (is.null(sigma_formula)) sigma_formula <- stats::as.formula(paste("~",   default_rhs))
