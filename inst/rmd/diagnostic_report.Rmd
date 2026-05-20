@@ -521,3 +521,153 @@ ggplot(scored_ok, aes(x = MAPQ)) +
   theme_minimal() +
   theme(legend.position = "bottom")
 ```
+
+```{r flag_strat_header, eval = has_scored, results = "asis"}
+cat("# 7. Predictor-stratified flag analysis\n\n")
+cat("The plots below break the flag rate down by transcript-level ",
+    "predictor bins, separating contributions from the two flag rules. ",
+    "Bars show the per-bin **percent of scored reads flagged** (stacked ",
+    "by flag source); numbers above each bar are the **total scored ",
+    "reads** in that bin. Use the bin counts to discount apparent peaks ",
+    "in low-population bins.\n\n", sep = "")
+```
+
+```{r flag_strat_setup, eval = has_scored, include = FALSE}
+has_paralog <- "max_pct_id" %in% names(scored)
+
+scored_pred <- scored |> dplyr::filter(!is.na(.data$rqr))
+
+make_bins <- function(x, breaks, labels) {
+  cut(x, breaks = breaks, include.lowest = TRUE,
+      labels = labels, right = FALSE)
+}
+
+gc_breaks <- c(30, 35, 40, 45, 50, 55, 60, 65, 70)
+gc_labels <- c("30-35", "35-40", "40-45", "45-50",
+               "50-55", "55-60", "60-65", "65-70")
+scored_pred$gc_bin <- make_bins(scored_pred$gc_content, gc_breaks, gc_labels)
+
+tx_breaks <- c(0, 250, 500, 1000, 2000, Inf)
+tx_labels <- c("<250", "250-500", "500-1k", "1k-2k", ">=2k")
+scored_pred$tx_bin <- make_bins(scored_pred$tx_length, tx_breaks, tx_labels)
+
+if (has_paralog) {
+  # max_pct_id == 0 exactly for non-paralogs, so split on (0, 50), etc.
+  pp_breaks <- c(-Inf, 0.5, 50, 80, 90, 100.5)
+  pp_labels <- c("None (0)", "(0,50)", "[50,80)", "[80,90)", ">=90")
+  scored_pred$pp_bin <- make_bins(scored_pred$max_pct_id,
+                                  pp_breaks, pp_labels)
+}
+
+summarise_bin <- function(df, bin_col) {
+  df |>
+    dplyr::filter(!is.na(.data[[bin_col]])) |>
+    dplyr::group_by(bin = .data[[bin_col]]) |>
+    dplyr::summarise(
+      n_scored   = dplyr::n(),
+      n_flag_rqr = sum(.data$flag_source == "rqr_low",     na.rm = TRUE),
+      n_flag_p0  = sum(.data$flag_source == "p0_dev_high", na.rm = TRUE),
+      .groups    = "drop"
+    ) |>
+    dplyr::mutate(
+      pct_rqr = 100 * .data$n_flag_rqr / pmax(.data$n_scored, 1),
+      pct_p0  = 100 * .data$n_flag_p0  / pmax(.data$n_scored, 1)
+    )
+}
+
+plot_bin_rates <- function(tab, xlab) {
+  long <- dplyr::bind_rows(
+    tab |> dplyr::transmute(.data$bin, .data$n_scored,
+                            src = "MAPQ = 0 deviance",
+                            pct = .data$pct_p0),
+    tab |> dplyr::transmute(.data$bin, .data$n_scored,
+                            src = "RQR low-tail (1..59)",
+                            pct = .data$pct_rqr)
+  )
+  long$src <- factor(long$src,
+                     levels = c("MAPQ = 0 deviance",
+                                "RQR low-tail (1..59)"))
+  totals <- tab |>
+    dplyr::mutate(pct_total = .data$pct_rqr + .data$pct_p0)
+  ggplot(long, aes(x = .data$bin, y = .data$pct, fill = .data$src)) +
+    geom_col(width = 0.75) +
+    geom_text(data = totals,
+              aes(x = .data$bin, y = .data$pct_total,
+                  label = format(.data$n_scored, big.mark = ",")),
+              inherit.aes = FALSE,
+              vjust = -0.4, size = 2.4, color = "grey30") +
+    scale_fill_manual(values = c("MAPQ = 0 deviance"   = "#7B3294",
+                                 "RQR low-tail (1..59)" = "#D85A30"),
+                      name = NULL) +
+    scale_y_continuous(expand = expansion(mult = c(0, 0.18)),
+                       labels = function(v) sprintf("%.2f%%", v)) +
+    labs(x = xlab, y = "% flagged") +
+    theme_minimal(base_size = 10) +
+    theme(legend.position = "bottom",
+          axis.text.x = element_text(angle = 35, hjust = 1))
+}
+```
+
+```{r flags_by_predictor, eval = has_scored, fig.width = 11, fig.height = 4.2, fig.cap = "Flag rate per bin of each transcript-level predictor, stratified by flag source. Bars are stacked (purple = MAPQ = 0 deviance, orange = RQR low-tail in MAPQ in 1..59); numbers above each bar are total reads scored in that bin. The gc_content panel uses 5% bins across the clean_features() clamp range; tx_length uses log-spaced bins; max_pct_id separates non-paralog transcripts (= 0) from the four paralog identity bands."}
+p_gc <- plot_bin_rates(summarise_bin(scored_pred, "gc_bin"),
+                       "gc_content (%)")
+p_tx <- plot_bin_rates(summarise_bin(scored_pred, "tx_bin"),
+                       "tx_length (bp)")
+
+panels <- if (has_paralog) {
+  p_pp <- plot_bin_rates(summarise_bin(scored_pred, "pp_bin"),
+                         "max_pct_id (%)")
+  p_gc + p_tx + p_pp
+} else {
+  p_gc + p_tx
+}
+
+panels +
+  patchwork::plot_layout(guides = "collect") &
+  theme(legend.position = "bottom")
+```
+
+```{r paralog_ecdf, eval = has_scored && has_paralog, fig.height = 3.8, fig.cap = "Empirical CDF of max_pct_id across scored reads, split by flag status. If flagged reads are paralog-enriched, the orange (flagged) curve sits to the right of the grey (unflagged) curve at intermediate-to-high identity values."}
+ecdf_df <- scored_pred |>
+  dplyr::mutate(flagged = ifelse(.data$flag_low %in% TRUE,
+                                 "Flagged", "Unflagged"))
+ggplot(ecdf_df, aes(x = .data$max_pct_id, colour = .data$flagged)) +
+  stat_ecdf(geom = "step", linewidth = 0.7) +
+  scale_colour_manual(values = c(Flagged   = "#D85A30",
+                                 Unflagged = "grey40"),
+                      name = NULL) +
+  scale_x_continuous(breaks = c(0, 25, 50, 75, 90, 100)) +
+  labs(x = "max_pct_id (cross-gene paralog identity, %)",
+       y = "ECDF") +
+  theme_minimal(base_size = 10) +
+  theme(legend.position = "bottom")
+```
+
+```{r paralog_within_mapq0, eval = has_scored && has_paralog}
+enrich <- scored_pred |>
+  dplyr::filter(.data$MAPQ == 0) |>
+  dplyr::mutate(flagged = ifelse(.data$flag_low %in% TRUE,
+                                 "Flagged (p0 dev > threshold)",
+                                 "Unflagged")) |>
+  dplyr::group_by(.data$flagged) |>
+  dplyr::summarise(
+    n_reads          = dplyr::n(),
+    n_paralog_ge50   = sum(.data$max_pct_id >= 50, na.rm = TRUE),
+    pct_paralog_ge50 = round(100 * mean(.data$max_pct_id >= 50,
+                                        na.rm = TRUE), 2),
+    n_paralog_ge90   = sum(.data$max_pct_id >= 90, na.rm = TRUE),
+    pct_paralog_ge90 = round(100 * mean(.data$max_pct_id >= 90,
+                                        na.rm = TRUE), 2),
+    .groups          = "drop"
+  )
+
+knitr::kable(enrich,
+  caption = paste("Paralog enrichment within MAPQ = 0 reads.",
+                  "Compares the deviance-flagged subset against the",
+                  "unflagged MAPQ = 0 background on the fraction of",
+                  "reads whose target transcript has a cross-gene",
+                  "paralog at >=50% / >=90% identity. A higher rate",
+                  "in the flagged row indicates that the deviance",
+                  "rule is preferentially flagging paralog-ambiguous",
+                  "reads."))
+```
