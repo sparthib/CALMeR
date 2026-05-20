@@ -9,6 +9,7 @@ score_reads(
   fit,
   filter_method = c("mad", "zscore"),
   threshold = -3,
+  dev_threshold = 3,
   seed = 42,
   primary_only = TRUE
 )
@@ -21,11 +22,20 @@ full set, not just the training subset).}
 or a \code{calmer_suite} returned by \code{\link[=fit_beinf_suite]{fit_beinf_suite()}}. If a suite is
 supplied, the suite's primary fit is used.}
 
-\item{filter_method}{One of \code{"mad"} (default) or \code{"zscore"}.
-For \code{"mad"}: flag if \code{rqr < median(rqr) + threshold * mad(rqr)}.
+\item{filter_method}{One of \code{"mad"} (default) or \code{"zscore"}. Controls
+the RQR-tail rule for continuous-MAPQ reads.
+For \code{"mad"}: flag if \code{rqr < median(rqr) + threshold * mad(rqr)},
+computed on the continuous-MAPQ subset only.
 For \code{"zscore"}: flag if \code{(rqr - mean(rqr)) / sd(rqr) < threshold}.}
 
-\item{threshold}{Numeric scalar; default \code{-3}.}
+\item{threshold}{Numeric scalar for the RQR rule; default \code{-3}.}
+
+\item{dev_threshold}{Numeric scalar for the MAPQ = 0 deviance rule;
+default \code{3} (mirrors \code{abs(threshold)}). Flag MAPQ = 0 reads when
+\verb{sqrt(-2 log p_hat_0) > dev_threshold}, i.e. when the model gave
+them less than \code{exp(-dev_threshold^2 / 2)} probability of being
+at the zero mass. With \code{dev_threshold = 3} that probability cutoff
+is ~ 0.011.}
 
 \item{seed}{Random seed for the uniform draws on point masses.}
 
@@ -39,9 +49,10 @@ data it saw during fitting.}
 }
 \value{
 A data frame with the input columns plus \code{mu_p}, \code{sigma_p},
-\code{nu_p}, \code{tau_p}, \code{rqr}, \code{flag_low}, \code{out_of_range}, and an
-attribute \code{"flag_threshold"} recording the absolute residual
-threshold used.
+\code{nu_p}, \code{tau_p}, \code{p0_hat}, \code{p1_hat}, \code{rqr}, \code{dev_zero},
+\code{flag_low}, \code{flag_source} (one of \code{"rqr_low"}, \code{"p0_dev_high"},
+\code{"none"}), \code{out_of_range}, and an attribute \code{"flag_threshold"}
+recording the RQR cutoff used.
 }
 \description{
 For every read in \code{features}, predicts the four BEINF parameters
@@ -50,12 +61,32 @@ randomized quantile residual (RQR) and flags reads with anomalously
 low residuals.
 }
 \details{
-For continuous response values, the RQR is the standard normal
-quantile of the model CDF at that value. For point masses (MAPQ = 0
-or MAPQ = 60), the residual is randomized over the corresponding CDF
-interval, following Dunn & Smyth (1996), so that the overall residual
-distribution is approximately N(0, 1) under a correctly specified
-model.
+For continuous response values (MAPQ in 1..59), the RQR is the
+standard normal quantile of the model CDF at that value. For point
+masses (MAPQ = 0 or MAPQ = 60), the residual is randomized over the
+corresponding CDF interval (Dunn & Smyth 1996), so the overall
+residual distribution is approximately N(0, 1) under a correctly
+specified model.
+
+Flag rule is asymmetric and applied per region:
+\itemize{
+\item \strong{MAPQ in (0, 60)} (continuous part) — flag if \code{rqr} falls
+in the lower tail (\code{rqr < flag_threshold}, where the
+threshold is set by \code{filter_method} + \code{threshold} on the
+continuous-only RQRs).
+\item \strong{MAPQ = 0} (lower point mass) — flag if the model is
+surprised by the zero, i.e. if the binomial deviance for
+"is the read at the zero mass?" is large:
+\verb{dev_zero = sqrt(-2 log p_hat_0) > dev_threshold}.
+Equivalently, flag if
+\code{p_hat_0 < exp(-dev_threshold^2 / 2)}.
+This catches well-covered, single-isoform, no-paralog reads
+that landed at MAPQ = 0 despite the model predicting a tiny
+probability of zero-mass outcome.
+\item \strong{MAPQ = 60} (upper point mass) — never flagged. MAPQ = 60
+is the maximum possible value, so it cannot be "unusually
+low" given any context.
+}
 
 Reads with \code{NA} in any required predictor are kept in the output but
 assigned \code{rqr = NA} and \code{flag_low = FALSE} (i.e. retained by default).

@@ -5,12 +5,32 @@
 #' randomized quantile residual (RQR) and flags reads with anomalously
 #' low residuals.
 #'
-#' For continuous response values, the RQR is the standard normal
-#' quantile of the model CDF at that value. For point masses (MAPQ = 0
-#' or MAPQ = 60), the residual is randomized over the corresponding CDF
-#' interval, following Dunn & Smyth (1996), so that the overall residual
-#' distribution is approximately N(0, 1) under a correctly specified
-#' model.
+#' For continuous response values (MAPQ in 1..59), the RQR is the
+#' standard normal quantile of the model CDF at that value. For point
+#' masses (MAPQ = 0 or MAPQ = 60), the residual is randomized over the
+#' corresponding CDF interval (Dunn & Smyth 1996), so the overall
+#' residual distribution is approximately N(0, 1) under a correctly
+#' specified model.
+#'
+#' Flag rule is asymmetric and applied per region:
+#' \itemize{
+#'   \item **MAPQ in (0, 60)** (continuous part) — flag if `rqr` falls
+#'         in the lower tail (`rqr < flag_threshold`, where the
+#'         threshold is set by `filter_method` + `threshold` on the
+#'         continuous-only RQRs).
+#'   \item **MAPQ = 0** (lower point mass) — flag if the model is
+#'         surprised by the zero, i.e. if the binomial deviance for
+#'         "is the read at the zero mass?" is large:
+#'         `dev_zero = sqrt(-2 log p_hat_0) > dev_threshold`.
+#'         Equivalently, flag if
+#'         `p_hat_0 < exp(-dev_threshold^2 / 2)`.
+#'         This catches well-covered, single-isoform, no-paralog reads
+#'         that landed at MAPQ = 0 despite the model predicting a tiny
+#'         probability of zero-mass outcome.
+#'   \item **MAPQ = 60** (upper point mass) — never flagged. MAPQ = 60
+#'         is the maximum possible value, so it cannot be "unusually
+#'         low" given any context.
+#' }
 #'
 #' Reads with `NA` in any required predictor are kept in the output but
 #' assigned `rqr = NA` and `flag_low = FALSE` (i.e. retained by default).
@@ -20,10 +40,18 @@
 #' @param fit Either a single `calmer_fit` returned by [fit_beinf()],
 #'   or a `calmer_suite` returned by [fit_beinf_suite()]. If a suite is
 #'   supplied, the suite's primary fit is used.
-#' @param filter_method One of `"mad"` (default) or `"zscore"`.
-#'   For `"mad"`: flag if `rqr < median(rqr) + threshold * mad(rqr)`.
+#' @param filter_method One of `"mad"` (default) or `"zscore"`. Controls
+#'   the RQR-tail rule for continuous-MAPQ reads.
+#'   For `"mad"`: flag if `rqr < median(rqr) + threshold * mad(rqr)`,
+#'   computed on the continuous-MAPQ subset only.
 #'   For `"zscore"`: flag if `(rqr - mean(rqr)) / sd(rqr) < threshold`.
-#' @param threshold Numeric scalar; default `-3`.
+#' @param threshold Numeric scalar for the RQR rule; default `-3`.
+#' @param dev_threshold Numeric scalar for the MAPQ = 0 deviance rule;
+#'   default `3` (mirrors `abs(threshold)`). Flag MAPQ = 0 reads when
+#'   `sqrt(-2 log p_hat_0) > dev_threshold`, i.e. when the model gave
+#'   them less than `exp(-dev_threshold^2 / 2)` probability of being
+#'   at the zero mass. With `dev_threshold = 3` that probability cutoff
+#'   is ~ 0.011.
 #' @param seed Random seed for the uniform draws on point masses.
 #' @param primary_only Logical; if `TRUE` (default) score only primary
 #'   alignments. Secondary alignments inherit `flag_low = FALSE`.
@@ -34,9 +62,10 @@
 #'   data it saw during fitting.
 #'
 #' @return A data frame with the input columns plus `mu_p`, `sigma_p`,
-#'   `nu_p`, `tau_p`, `rqr`, `flag_low`, `out_of_range`, and an
-#'   attribute `"flag_threshold"` recording the absolute residual
-#'   threshold used.
+#'   `nu_p`, `tau_p`, `p0_hat`, `p1_hat`, `rqr`, `dev_zero`,
+#'   `flag_low`, `flag_source` (one of `"rqr_low"`, `"p0_dev_high"`,
+#'   `"none"`), `out_of_range`, and an attribute `"flag_threshold"`
+#'   recording the RQR cutoff used.
 #'
 #' @examples
 #' ex       <- calmer_example_data()
@@ -57,9 +86,12 @@ score_reads <- function(features,
                         fit,
                         filter_method = c("mad", "zscore"),
                         threshold     = -3,
+                        dev_threshold = 3,
                         seed          = 42,
                         primary_only  = TRUE) {
   filter_method <- match.arg(filter_method)
+  stopifnot(is.numeric(dev_threshold), length(dev_threshold) == 1L,
+            dev_threshold > 0)
 
   fit <- primary_fit(fit)
   if (!inherits(fit, "calmer_fit")) {
@@ -82,12 +114,16 @@ score_reads <- function(features,
   }
   features$y <- features$MAPQ / 60
 
-  features$mu_p     <- NA_real_
-  features$sigma_p  <- NA_real_
-  features$nu_p     <- NA_real_
-  features$tau_p    <- NA_real_
-  features$rqr      <- NA_real_
-  features$flag_low <- FALSE
+  features$mu_p        <- NA_real_
+  features$sigma_p     <- NA_real_
+  features$nu_p        <- NA_real_
+  features$tau_p       <- NA_real_
+  features$p0_hat      <- NA_real_
+  features$p1_hat      <- NA_real_
+  features$rqr         <- NA_real_
+  features$dev_zero    <- NA_real_
+  features$flag_low    <- FALSE
+  features$flag_source <- "none"
 
   scorable <- stats::complete.cases(
     features[, c("MAPQ", predictors, predictors_sc), drop = FALSE]
@@ -140,22 +176,58 @@ score_reads <- function(features,
     seed  = seed
   )
 
-  features$mu_p[scorable]    <- mu_p
-  features$sigma_p[scorable] <- sigma_p
-  features$nu_p[scorable]    <- nu_p
-  features$tau_p[scorable]   <- tau_p
-  features$rqr[scorable]     <- rqr
+  # Predicted point-mass probabilities (BEINF parametrisation: nu and
+  # tau are the unnormalised mass weights for y = 0 and y = 1).
+  p0_hat <- nu_p  / (1 + nu_p + tau_p)
+  p1_hat <- tau_p / (1 + nu_p + tau_p)
 
-  flag_thresh <- if (filter_method == "mad") {
-    stats::median(rqr) + threshold * stats::mad(rqr)
+  # Binomial deviance residual for "is the read at the zero mass?",
+  # restricted to MAPQ = 0 observations (where its sign is unambiguous).
+  y_scored <- newdata$y
+  at_zero  <- y_scored == 0
+  dev_zero <- ifelse(at_zero & p0_hat > 0 & p0_hat < 1,
+                     sqrt(-2 * log(p0_hat)),
+                     NA_real_)
+
+  features$mu_p[scorable]     <- mu_p
+  features$sigma_p[scorable]  <- sigma_p
+  features$nu_p[scorable]     <- nu_p
+  features$tau_p[scorable]    <- tau_p
+  features$p0_hat[scorable]   <- p0_hat
+  features$p1_hat[scorable]   <- p1_hat
+  features$rqr[scorable]      <- rqr
+  features$dev_zero[scorable] <- dev_zero
+
+  # RQR-tail threshold computed on the continuous-MAPQ subset only, so
+  # the median/MAD aren't distorted by the point-mass residuals.
+  in_continuous <- y_scored > 0 & y_scored < 1
+  if (any(in_continuous)) {
+    rqr_cont <- rqr[in_continuous]
+    flag_thresh <- if (filter_method == "mad") {
+      stats::median(rqr_cont) + threshold * stats::mad(rqr_cont)
+    } else {
+      threshold * stats::sd(rqr_cont) + mean(rqr_cont)
+    }
   } else {
-    threshold * stats::sd(rqr) + mean(rqr)
+    flag_thresh <- NA_real_
   }
 
-  features$flag_low[scorable] <- rqr < flag_thresh
+  flag_rqr <- !is.na(flag_thresh) & in_continuous & rqr < flag_thresh
+  flag_p0  <- at_zero & !is.na(dev_zero) & dev_zero > dev_threshold
+  # MAPQ = 60 (y == 1) is never flagged: the read achieved the maximum
+  # possible MAPQ and so cannot be "unusually low" given any context.
 
-  attr(features, "flag_threshold") <- flag_thresh
-  attr(features, "filter_method")  <- filter_method
-  attr(features, "threshold")      <- threshold
+  flag_low <- flag_rqr | flag_p0
+  flag_src <- ifelse(flag_rqr, "rqr_low",
+                     ifelse(flag_p0, "p0_dev_high", "none"))
+
+  features$flag_low[scorable]    <- flag_low
+  features$flag_source[scorable] <- flag_src
+
+  attr(features, "flag_threshold")     <- flag_thresh
+  attr(features, "filter_method")      <- filter_method
+  attr(features, "threshold")          <- threshold
+  attr(features, "dev_threshold")      <- dev_threshold
+  attr(features, "p0_threshold")       <- exp(-dev_threshold^2 / 2)
   features
 }

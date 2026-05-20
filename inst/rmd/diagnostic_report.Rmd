@@ -376,22 +376,42 @@ patchwork::wrap_plots(ey_panels, nrow = 1)
 ```
 
 ```{r scoring_setup, eval = has_scored, include = FALSE}
-flag_thresh <- attr(scored, "flag_threshold")
-filt_method <- attr(scored, "filter_method")
-threshold   <- attr(scored, "threshold")
-n_total     <- nrow(scored)
-n_scored    <- sum(!is.na(scored$rqr))
-n_flagged   <- sum(scored$flag_low %in% TRUE)
+flag_thresh   <- attr(scored, "flag_threshold")
+filt_method   <- attr(scored, "filter_method")
+threshold     <- attr(scored, "threshold")
+dev_threshold <- attr(scored, "dev_threshold")
+p0_threshold  <- attr(scored, "p0_threshold")
+n_total       <- nrow(scored)
+n_scored      <- sum(!is.na(scored$rqr))
+n_flagged     <- sum(scored$flag_low %in% TRUE)
+flag_src      <- if ("flag_source" %in% names(scored)) scored$flag_source
+                 else rep(NA_character_, nrow(scored))
+n_flag_rqr    <- sum(flag_src == "rqr_low",     na.rm = TRUE)
+n_flag_p0     <- sum(flag_src == "p0_dev_high", na.rm = TRUE)
 ```
 
 ```{r scoring_header, eval = has_scored, results = "asis"}
 cat("# 5. Scoring summary\n\n")
-cat(sprintf("- Filter method: **%s**\n", filt_method))
-cat(sprintf("- Threshold:     **%g**\n", threshold))
-cat(sprintf("- Residual cut:  RQR < %.3f\n", flag_thresh))
-cat(sprintf("- Reads scored:  %d / %d\n", n_scored, n_total))
-cat(sprintf("- Reads flagged: %d (%.2f%% of scored)\n",
+cat("Flagging is asymmetric across the MAPQ range:\n\n")
+cat("- **MAPQ in (0, 60)**: RQR low-tail rule.\n")
+cat("- **MAPQ = 0**: binomial deviance rule on the predicted zero-mass probability.\n")
+cat("- **MAPQ = 60**: never flagged (max MAPQ cannot be 'unusually low').\n\n")
+cat(sprintf("- Filter method:           **%s**\n", filt_method))
+cat(sprintf("- RQR threshold:           **%g** (flag if RQR < %.3f)\n",
+            threshold, flag_thresh))
+if (!is.null(dev_threshold) && !is.null(p0_threshold)) {
+  cat(sprintf("- MAPQ = 0 deviance cut:   sqrt(-2 log p_hat_0) > %.2f  (p_hat_0 < %.4g)\n",
+              dev_threshold, p0_threshold))
+}
+cat(sprintf("- Reads scored:            %d / %d\n", n_scored, n_total))
+cat(sprintf("- Reads flagged:           %d (%.2f%% of scored)\n",
             n_flagged, 100 * n_flagged / max(n_scored, 1)))
+if ("flag_source" %in% names(scored)) {
+  cat(sprintf("  - via RQR low-tail:       %d (%.2f%% of scored)\n",
+              n_flag_rqr, 100 * n_flag_rqr / max(n_scored, 1)))
+  cat(sprintf("  - via MAPQ = 0 deviance:  %d (%.2f%% of scored)\n",
+              n_flag_p0,  100 * n_flag_p0  / max(n_scored, 1)))
+}
 ```
 
 ```{r rqr_scored_density, eval = has_scored, fig.height = 4, fig.cap = "RQR distribution on scored reads with flag threshold (red dashed)."}
@@ -407,6 +427,7 @@ cat("# 6. Where flags landed\n\n")
 ```
 
 ```{r flags_by_niso_table, eval = has_scored}
+has_src <- "flag_source" %in% names(scored)
 flag_by_niso <- scored |>
   dplyr::filter(!is.na(.data$rqr)) |>
   dplyr::group_by(.data$n_isoforms) |>
@@ -414,6 +435,10 @@ flag_by_niso <- scored |>
     n_scored          = dplyr::n(),
     n_flagged         = sum(.data$flag_low %in% TRUE),
     pct_flagged       = round(100 * mean(.data$flag_low %in% TRUE), 2),
+    n_flag_rqr        = if (has_src)
+                          sum(.data$flag_source == "rqr_low") else NA_integer_,
+    n_flag_p0         = if (has_src)
+                          sum(.data$flag_source == "p0_dev_high") else NA_integer_,
     median_tx_length  = round(stats::median(.data$tx_length, na.rm = TRUE)),
     median_gc_content = round(stats::median(.data$gc_content, na.rm = TRUE), 1),
     pct_paralog_gt50  = if ("max_pct_id" %in% names(scored))
@@ -424,7 +449,9 @@ flag_by_niso <- scored |>
   dplyr::arrange(.data$n_isoforms)
 
 knitr::kable(flag_by_niso,
-  caption = paste("Per n_isoforms: scored count, flagged count, % flagged,",
+  caption = paste("Per n_isoforms: scored count, total flagged, % flagged,",
+                  "flags from each rule (n_flag_rqr = RQR low-tail on",
+                  "MAPQ in 1..59; n_flag_p0 = deviance rule on MAPQ = 0),",
                   "and group-level context (median tx_length, median",
                   "gc_content, % of reads on transcripts with a paralog",
                   "at >50% identity)."))
@@ -460,17 +487,34 @@ ggplot(hm, aes(x = factor(n_isoforms), y = pct_cov_bin, fill = pct_flagged)) +
   theme_minimal(base_size = 10)
 ```
 
-```{r mapq_by_flag, eval = has_scored, fig.height = 3.5, fig.cap = "Scored MAPQ distribution. Red rug ticks mark MAPQ values of the flagged reads."}
+```{r mapq_by_flag, eval = has_scored, fig.height = 3.5, fig.cap = "Scored MAPQ distribution. Rug ticks mark flagged reads, coloured by flag source: orange = RQR low-tail (MAPQ in 1..59), purple = MAPQ = 0 deviance (model predicted zero-mass to be unlikely)."}
 scored_ok <- scored |> dplyr::filter(!is.na(.data$rqr))
 flagged   <- scored_ok |> dplyr::filter(.data$flag_low %in% TRUE)
+
+# Backwards-compat: older scored frames may not carry flag_source.
+if (!"flag_source" %in% names(flagged)) {
+  flagged$flag_source <- "rqr_low"
+}
+flagged$flag_source <- factor(flagged$flag_source,
+                              levels = c("rqr_low", "p0_dev_high"))
 
 ggplot(scored_ok, aes(x = MAPQ)) +
   geom_histogram(binwidth = 1, fill = "steelblue",
                  color = "white", alpha = 0.85) +
-  geom_rug(data = flagged, aes(x = MAPQ),
+  geom_rug(data = flagged, aes(x = MAPQ, colour = flag_source),
            inherit.aes = FALSE,
-           color = "#D85A30", linewidth = 0.8, length = unit(0.04, "npc")) +
+           linewidth = 0.8, length = unit(0.04, "npc"),
+           alpha = 0.7) +
   scale_x_continuous(breaks = c(0, 10, 20, 30, 40, 50, 60)) +
+  scale_colour_manual(
+    values = c(rqr_low     = "#D85A30",
+               p0_dev_high = "#7B3294"),
+    labels = c(rqr_low     = "RQR low-tail (1..59)",
+               p0_dev_high = "MAPQ = 0 deviance"),
+    name   = "Flag source",
+    drop   = FALSE
+  ) +
   labs(x = "MAPQ", y = "Count") +
-  theme_minimal()
+  theme_minimal() +
+  theme(legend.position = "bottom")
 ```
