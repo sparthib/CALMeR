@@ -384,8 +384,11 @@ p0_threshold  <- attr(scored, "p0_threshold")
 n_total       <- nrow(scored)
 n_scored      <- sum(!is.na(scored$rqr))
 n_flagged     <- sum(scored$flag_low %in% TRUE)
-flag_src      <- if ("flag_source" %in% names(scored)) scored$flag_source
-                 else rep(NA_character_, nrow(scored))
+flag_src      <- if ("flag_source" %in% names(scored)) {
+                   scored$flag_source
+                 } else {
+                   rep(NA_character_, nrow(scored))
+                 }
 n_flag_rqr    <- sum(flag_src == "rqr_low",     na.rm = TRUE)
 n_flag_p0     <- sum(flag_src == "p0_dev_high", na.rm = TRUE)
 ```

@@ -5,7 +5,7 @@
 #' Useful for comparing flexible (penalized B-spline) vs. linear
 #' parametrisations, with and without paralog context.
 #'
-#' By default the suite contains four named fits:
+#' By default the suite contains five named fits:
 #' \describe{
 #'   \item{`pb_paralog`}{`pb(., inter = n_knots)` on the four canonical
 #'         features **plus a linear term in `max_pct_id`**. The paralog
@@ -13,6 +13,12 @@
 #'         `max_pct_id` is highly zero-inflated (most transcripts have
 #'         no paralog), which destabilises spline fits. Fitted only if
 #'         `max_pct_id` is present on `features`.}
+#'   \item{`pb_paralog_interact`}{Same as `pb_paralog` plus a
+#'         linear-by-linear interaction `tx_length_sc:pct_covered_sc`.
+#'         Tests whether the relationship between coverage and read
+#'         quality depends on transcript length on top of the marginal
+#'         non-linear effects already captured by `pb()`. Same paralog
+#'         requirement as `pb_paralog`.}
 #'   \item{`pb_no_paralog`}{`pb(., inter = n_knots)` on the four
 #'         canonical features.}
 #'   \item{`linear_paralog`}{Linear terms on all five predictors
@@ -31,7 +37,7 @@
 #'   \item otherwise `"pb_no_paralog"`.
 #' }
 #'
-#' Fitting four to five BEINF models is several times slower than
+#' Fitting five to six BEINF models is several times slower than
 #' fitting one. Plan accordingly when calling from an array job.
 #'
 #' @param features Cleaned training data frame from [clean_features()].
@@ -170,6 +176,33 @@ fit_beinf_suite <- function(features,
                                  n             = n,
                                  seed          = seed,
                                  trace         = trace)
+
+    # Same hybrid backbone as pb_paralog, plus a linear-by-linear
+    # interaction between tx_length and pct_covered. Tests whether the
+    # coverage-vs-quality relationship shifts with transcript length on
+    # top of what the marginal pb() splines already explain.
+    if (all(c("tx_length_sc", "pct_covered_sc") %in%
+            c(np_sc, paralog_sc))) {
+      message("  fitting pb_paralog_interact (pb_paralog + tx_length:pct_covered) ...")
+      interact_rhs <- paste(hybrid_rhs, "+ tx_length_sc:pct_covered_sc")
+      hif <- list(
+        mu    = stats::as.formula(paste("y ~", interact_rhs)),
+        sigma = stats::as.formula(paste("~",   interact_rhs)),
+        nu    = stats::as.formula(paste("~",   interact_rhs)),
+        tau   = stats::as.formula(paste("~",   interact_rhs))
+      )
+      fits$pb_paralog_interact <- fit_beinf(features,
+                                            predictors    = predictors_with_paralog,
+                                            formula       = hif$mu,
+                                            sigma_formula = hif$sigma,
+                                            nu_formula    = hif$nu,
+                                            tau_formula   = hif$tau,
+                                            n             = n,
+                                            seed          = seed,
+                                            trace         = trace)
+    } else {
+      message("  skipping pb_paralog_interact (tx_length/pct_covered not in predictor set).")
+    }
   }
 
   message("  fitting pb_no_paralog ...")
