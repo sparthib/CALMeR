@@ -6,63 +6,98 @@
 \usage{
 calmer_report(
   fit,
+  features = NULL,
   scored = NULL,
   out_file,
   format = c("pdf", "html"),
-  sample_name = NULL
+  sample_name = NULL,
+  score_args = list()
 )
 }
 \arguments{
 \item{fit}{Either a single \code{calmer_fit} from \code{\link[=fit_beinf]{fit_beinf()}} or a
-\code{calmer_suite} from \code{\link[=fit_beinf_suite]{fit_beinf_suite()}}. When a suite is supplied,
-the model-comparison section is rendered and the suite's primary
-fit drives the per-model diagnostic sections.}
+\code{calmer_suite} from \code{\link[=fit_beinf_suite]{fit_beinf_suite()}}.}
 
-\item{scored}{Optional data frame returned by \code{\link[=score_reads]{score_reads()}}.}
+\item{features}{Cleaned training data frame from \code{\link[=clean_features]{clean_features()}}.
+Required if \code{fit} is a suite and you want the rank-pick + re-score
+behaviour. If \code{NULL}, the report falls back to \code{scored} and the
+suite's pre-set primary.}
+
+\item{scored}{Optional data frame returned by \code{\link[=score_reads]{score_reads()}}. Used
+only when \code{features} is \code{NULL} (legacy path). If both \code{features}
+and \code{scored} are supplied, \code{features} wins and the report
+re-scores internally.}
 
 \item{out_file}{Path to the rendered report.}
 
 \item{format}{Either \code{"pdf"} (default) or \code{"html"}.}
 
 \item{sample_name}{Optional string displayed in the report title.}
+
+\item{score_args}{Named list of extra arguments to forward to
+\code{\link[=score_reads]{score_reads()}} when re-scoring internally (e.g.
+\code{list(filter_method = "mad", threshold = -3)}).}
 }
 \value{
-Invisibly, the absolute path to the rendered file.
+Invisibly, the absolute path to the rendered file, with
+attributes \code{"picked_model"} (the name picked from the suite, if
+any) and \code{"scored"} (the data frame the report rendered against).
 }
 \description{
 Renders a parameterized Rmarkdown report containing model diagnostics
-on the training data and (if \code{scored} is supplied) summaries of where
-flags landed in the scored data set.
+on the training data and (if a scored data set is available) summaries
+of where flags landed in the scored data set.
 }
 \details{
+When \code{fit} is a \code{calmer_suite} and \code{features} is supplied,
+\code{calmer_report()} picks the "best" model from the suite by ranking
+the fits on three metrics — \strong{AIC}, \strong{BIC}, and \strong{Nagelkerke
+pseudo-R²} — and selecting the model with the smallest \emph{average}
+rank. The picked model then drives all subsequent sections (residual
+diagnostics, partial effects, coefficient forest plot) and is also
+used to re-score the data via \code{\link[=score_reads]{score_reads()}}, so the flag stats in
+the report match the picked model. The pick and the full ranking
+table are reported up front.
+
+When \code{fit} is a single \code{calmer_fit}, no ranking is done; the fit is
+used as supplied. When \code{fit} is a suite but no \code{features} is given,
+the report falls back to the suite's pre-set primary fit and the
+pre-computed \code{scored} argument (with a warning).
+
 Sections:
 \enumerate{
 \item Training summary (predictor distributions, MAPQ histogram).
-\item Model comparison — only if a \code{calmer_suite} is supplied.
-AIC / BIC / global EDF / pseudo-R^2 across all fits in the
-suite, side-by-side residual QQ panels.
-\item Model fit for the primary model (formulas, EDFs, pseudo-R^2).
-\item Residual diagnostics (global QQ + density vs N(0,1), RQR
-density faceted by each predictor's quantile bins).
+\item Model comparison (only if a \code{calmer_suite} is supplied):
+AIC / BIC / Nagelkerke pseudo-R² across all fits in the
+suite, with ranks and the picked model highlighted. QQ
+panels per variant.
+\item Picked-model fit diagnostics (formulas, EDFs).
+\item Residual diagnostics (global QQ + density vs N(0, 1), RQR
+density faceted by each predictor's bins).
 \item Partial effects on \eqn{E[\mathrm{MAPQ}]}.
-\item Coefficient forest plot for all BEINF parameters.
-\item Scoring summary — only if \code{scored} is supplied.
-\item Where flags landed — only if \code{scored} is supplied.
+\item Coefficient forest plot — 95\% Wald intervals for the
+non-spline terms in each BEINF distributional parameter
+(mu / sigma / nu / tau).
+\item Scoring summary (only if \code{scored} is available).
+\item Where flags landed: per-\code{n_isoforms} flag breakdown and
+per-predictor flagged-read distribution.
 }
 }
 \examples{
 if (rmarkdown::pandoc_available()) {
   ex       <- calmer_example_data()
-  features <- extract_features(ex$bam, ex$gtf, ex$fasta)
+  paralog  <- make_paralog_table(ex$fasta, ex$gtf, paf_path = ex$paf)
+  features <- extract_features(ex$bam, ex$gtf, ex$fasta,
+                               paralog_table = paralog)
   clean    <- clean_features(features)
   fit <- fit_beinf(
     clean, n = 1000,
-    formula       = y ~ n_isoforms_sc + tx_length_sc + gc_content_sc + pct_covered_sc,
+    formula       = y ~ tx_length_sc + gc_content_sc + pct_covered_sc +
+                        n_isoforms + I(pmax(n_isoforms - 5, 0)) + has_paralog,
     sigma_formula = ~ 1, nu_formula = ~ 1, tau_formula = ~ 1
   )
-  scored <- score_reads(features, fit, filter_method = "mad", threshold = -3)
   out <- tempfile(fileext = ".html")
-  calmer_report(fit, scored, out_file = out, format = "html")
+  calmer_report(fit, features = clean, out_file = out, format = "html")
   file.exists(out)
 }
 

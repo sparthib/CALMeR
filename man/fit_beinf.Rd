@@ -8,17 +8,20 @@ fit_beinf(
   features,
   n = 50000,
   seed = 42,
-  predictors = c("n_isoforms", "tx_length", "gc_content", "pct_covered"),
+  scaled_predictors = c("tx_length", "gc_content", "pct_covered"),
+  piecewise_predictors = list(n_isoforms = 5),
+  linear_predictors = c("has_paralog"),
   formula = NULL,
   sigma_formula = NULL,
   nu_formula = NULL,
   tau_formula = NULL,
-  n_knots = 5,
+  inter = 5,
   trace = FALSE
 )
 }
 \arguments{
-\item{features}{Data frame from \code{\link[=extract_features]{extract_features()}}.}
+\item{features}{Data frame from \code{\link[=extract_features]{extract_features()}} /
+\code{\link[=clean_features]{clean_features()}}.}
 
 \item{n}{Number of primary-alignment reads to sample for training
 (default 50000). If \code{features} has fewer primary alignments than
@@ -26,22 +29,33 @@ fit_beinf(
 
 \item{seed}{Random seed for the subset (default 42).}
 
-\item{predictors}{Character vector of column names in \code{features} to
-use as predictors. Default is the four canonical features:
-\code{c("n_isoforms", "tx_length", "gc_content", "pct_covered")}.}
+\item{scaled_predictors}{Character vector of predictor columns to
+z-score and (in the default formula) wrap in \code{pb()}. Default
+\code{c("tx_length", "gc_content", "pct_covered")}.}
+
+\item{piecewise_predictors}{Named list mapping predictor name to
+knot value. Each entry enters as \verb{<p> + I(pmax(<p> - knot, 0))}.
+Default \code{list(n_isoforms = 5)}. Pass \code{list()} to disable.}
+
+\item{linear_predictors}{Character vector of predictor columns to
+enter as plain linear terms (no z-scoring). Default
+\code{c("has_paralog")}. Pass \code{character(0)} to disable.}
 
 \item{formula}{Optional gamlss formula for \code{mu}. If \code{NULL}, a default
-\code{pb()}-based formula is built from \code{predictors} after pre-scaling.
-In a custom formula, refer to scaled predictors as
-\verb{<predictor>_sc} (e.g. \code{n_isoforms_sc}).}
+formula is built combining \verb{pb(<x>_sc)} for the scaled set, the
+two-piece basis for each piecewise predictor, and raw terms for
+the linear set. In a custom formula, refer to scaled predictors
+as \verb{<predictor>_sc} (e.g. \code{tx_length_sc}).}
 
 \item{sigma_formula, nu_formula, tau_formula}{Optional formulas for the
-other BEINF distributional parameters. If \code{NULL}, the same default
-formula is used for each.}
+other BEINF distributional parameters. If \code{NULL}, each defaults to
+the same RHS as \code{formula} (the default-built one if \code{formula} is
+\code{NULL}, otherwise the user-supplied one).}
 
-\item{n_knots}{Integer; number of intervals (passed as \code{inter} to
-\code{\link[gamlss:ps]{gamlss::pb()}}) for each penalized B-spline term in the default
-formula. Ignored when a custom \code{formula} is supplied. Default \code{5}.}
+\item{inter}{Integer; number of equal-spaced intervals for each
+penalized B-spline term in the default formula. Forwarded to the
+\code{inter} argument of \code{\link[gamlss:ps]{gamlss::pb()}}. Ignored when a custom
+\code{formula} is supplied. Default \code{5}.}
 
 \item{trace}{Logical; if \code{TRUE}, print gamlss convergence messages.
 Default \code{FALSE}.}
@@ -51,35 +65,61 @@ A list of class \code{"calmer_fit"} with:
 \describe{
 \item{fit}{Fitted gamlss BEINF model.}
 \item{scale_params}{Named list of \code{list(center, scale)} per
-predictor, used to standardize new data identically.}
-\item{predictors}{Character vector of predictor names.}
-\item{training_data}{Cleaned + scaled training data.}
+scaled predictor, used to standardize new data identically.}
+\item{scaled_predictors, piecewise_predictors, linear_predictors}{
+The three predictor specs, mirrored from the arguments.}
+\item{predictors}{Character vector of all predictor names (union
+of the three sets) for backwards-compatible access.}
+\item{winsor_bounds}{Length-2 numeric copy of
+\code{attr(features, "pct_covered_winsor_bounds")} if present on the
+input, otherwise \code{NULL}. Used by \code{\link[=score_reads]{score_reads()}} to apply
+identical winsorize cutoffs to a scoring set.}
+\item{training_data}{Cleaned + scaled training subset.}
 \item{formula}{The four formulas actually used.}
 \item{call}{The matched call.}
 }
 }
 \description{
 Samples \code{n} primary-alignment reads and fits a Beta-Inflated (BEINF)
-regression of \code{MAPQ / 60} against the supplied predictors. By default,
-all numeric predictors enter through penalized B-splines (\code{pb()}) on
-pre-scaled versions; users can override any of the four BEINF parameter
-formulas (mu, sigma, nu, tau) to fit a different functional form.
+regression of \code{MAPQ / 60} against the supplied predictors. Predictors
+are split into three classes that enter the formula differently:
+\describe{
+\item{\code{scaled_predictors}}{Z-scored on the training subset and
+entered through penalized B-splines (\verb{pb(<x>_sc, inter = ...)})
+in the default formula, where the number of intervals is
+set by the \code{inter} argument. Default: \code{tx_length},
+\code{gc_content}, \code{pct_covered}.}
+\item{\code{piecewise_predictors}}{A named list mapping predictor name
+to a knot value. The predictor enters as two linear basis
+terms with a kink at the knot:
+\verb{<p> + I(pmax(<p> - knot, 0))}. Not z-scored. Default:
+\code{list(n_isoforms = 5)}.}
+\item{\code{linear_predictors}}{Plain linear terms (1 df). Not z-scored;
+expected to be 0/1 indicators or other already-bounded
+covariates. Default: \code{has_paralog}.}
+}
 }
 \details{
-Filtering on annotation features (e.g. dropping rare \code{n_isoforms},
-extreme GC content, very short or very long transcripts) is the
-caller's responsibility — pass an already-filtered \code{features} data
-frame.
+Filtering on annotation features (e.g. lumping rare \code{n_isoforms},
+log-transforming \code{tx_length}, winsorizing \code{pct_covered}) is the
+caller's responsibility — pass an already-cleaned \code{features} data
+frame, typically from \code{\link[=clean_features]{clean_features()}}. If the data frame carries
+a \code{pct_covered_winsor_bounds} attribute, it is preserved on the fit
+so \code{\link[=score_reads]{score_reads()}} can apply the same bounds to a scoring set.
 }
 \examples{
 ex       <- calmer_example_data()
-features <- extract_features(ex$bam, ex$gtf, ex$fasta)
+paralog  <- make_paralog_table(ex$fasta, ex$gtf, paf_path = ex$paf)
+features <- extract_features(ex$bam, ex$gtf, ex$fasta,
+                             paralog_table = paralog)
 clean    <- clean_features(features)
-# On the small bundled dataset, override default pb()-spline formulas
-# with linear terms so the fit converges quickly.
+# On the small bundled dataset, override the default pb() formula with
+# linear terms so the fit converges quickly.
 fit <- fit_beinf(
   clean, n = 1000,
-  formula       = y ~ n_isoforms_sc + tx_length_sc + gc_content_sc + pct_covered_sc,
+  formula       = y ~ tx_length_sc + gc_content_sc + pct_covered_sc +
+                      n_isoforms + I(pmax(n_isoforms - 5, 0)) +
+                      has_paralog,
   sigma_formula = ~ 1,
   nu_formula    = ~ 1,
   tau_formula   = ~ 1

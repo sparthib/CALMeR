@@ -23,14 +23,17 @@
 #'
 #' @examples
 #' ex       <- calmer_example_data()
-#' features <- extract_features(ex$bam, ex$gtf, ex$fasta)
+#' paralog  <- make_paralog_table(ex$fasta, ex$gtf, paf_path = ex$paf)
+#' features <- extract_features(ex$bam, ex$gtf, ex$fasta,
+#'                              paralog_table = paralog)
 #' clean    <- clean_features(features)
 #' fit <- fit_beinf(
 #'   clean, n = 1000,
-#'   formula       = y ~ n_isoforms_sc + tx_length_sc + gc_content_sc + pct_covered_sc,
+#'   formula       = y ~ tx_length_sc + gc_content_sc + pct_covered_sc +
+#'                       n_isoforms + I(pmax(n_isoforms - 5, 0)) + has_paralog,
 #'   sigma_formula = ~ 1, nu_formula = ~ 1, tau_formula = ~ 1
 #' )
-#' scored <- score_reads(features, fit, filter_method = "mad", threshold = -3)
+#' scored <- score_reads(clean, fit, filter_method = "mad", threshold = -3)
 #' filt <- filter_bam(ex$bam, scored,
 #'                    out_bam = tempfile(fileext = ".bam"),
 #'                    out_tsv = tempfile(fileext = ".tsv.gz"))

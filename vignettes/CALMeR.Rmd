@@ -25,37 +25,47 @@ the full table, and writes a filtered BAM plus a TSV of flagged reads.
 
 The motivation: a uniform MAPQ threshold (e.g. `samtools view -q 30`)
 disproportionately discards reads from highly multi-isoform genes,
-GC-extreme transcripts, and long transcripts — not because the
-alignments are low quality but because these transcript-level
-properties systematically suppress MAPQ. CALMeR conditions on
-transcript context to distinguish noise from biology.
+GC-extreme transcripts, long transcripts, and reads on transcripts
+that have a cross-gene paralog — not because the alignments are low
+quality but because these transcript-level properties systematically
+suppress MAPQ. CALMeR conditions on transcript context to distinguish
+noise from biology.
 
-The standard pipeline is six steps; each function is one stage:
+The standard pipeline is one function per stage:
 
-1. `extract_features()` — read the BAM + GTF + transcriptome FASTA,
+1. `make_paralog_table()` — run a minimap2 `asm20` self-alignment of the
+   transcriptome FASTA and derive a per-transcript binary `has_paralog`
+   flag (TRUE if the transcript has at least one cross-gene alignment
+   passing `alen >= 50` and `query_cov >= 70%`). Run once per annotation.
+2. `extract_features()` — read the BAM + GTF + transcriptome FASTA,
    build a per-read feature table (MAPQ, alignment length, transcript
    length, isoform count per gene, GC content, percent transcript
-   covered). Optionally joins paralog context columns (`max_pct_id`,
-   `has_paralog_*`) when `paralog_table = ...` is supplied.
-2. `clean_features()` — apply standard pre-fit filters (primary
-   alignments only) and clamp predictor values into specified bounds
-   so the same cleaned table is safe to use for both training and
-   scoring (no spline extrapolation past the trained domain).
-3. `inspect_predictors()` — diagnostic plots of predictor
-   distributions to help pick clamp bounds before fitting.
-4. `fit_beinf()` — fit a single BEINF regression on a sampled subset.
-5. `fit_beinf_suite()` — fit a *suite* of four default BEINF models
-   (penalized B-spline / linear × with / without paralog) for
-   model-comparison reports. The suite's primary fit is used
-   downstream by `score_reads()` and `calmer_report()`.
-6. `score_reads()` — compute randomized quantile residuals for every
+   covered, and the `has_paralog` flag joined from step 1).
+3. `clean_features()` — apply the canonical preprocessing pipeline:
+   primary-only filter, lump `n_isoforms` at 7, natural-log of
+   `tx_length`, winsorize `pct_covered` at the 1st/99th percentiles
+   (winsorize bounds attached as an attribute so the same bounds can
+   be reused at scoring time).
+4. `inspect_predictors()` — diagnostic plots of predictor distributions
+   to inform downstream choices. Optional.
+5. `fit_beinf()` — fit a single BEINF regression on a sampled training
+   subset. Predictors split into three classes: `scaled_predictors`
+   (z-scored, wrapped in `pb()`), `piecewise_predictors` (raw, two-piece
+   linear basis with a knot), and `linear_predictors` (raw, plain linear).
+6. `fit_beinf_suite()` — alternative to (5): fit a *suite* of up to 12
+   variants for model comparison ({pb, linear} smoother × three
+   interaction forms × with/without `has_paralog`). The suite is what
+   `calmer_report()` ranks across to pick a primary model.
+7. `score_reads()` — compute randomized quantile residuals for every
    read and flag those whose RQR falls in the lower tail. Accepts
    either a single `calmer_fit` or a `calmer_suite`.
-7. `filter_bam()` — write a filtered BAM (flagged reads removed) + a
+8. `filter_bam()` — write a filtered BAM (flagged reads removed) + a
    TSV of flagged reads with their feature values and residuals.
-8. `calmer_report()` — render an HTML or PDF diagnostic report.
-   When passed a `calmer_suite`, includes a model-comparison section
-   with AIC / BIC / EDF / pseudo-R² and side-by-side QQ panels.
+9. `calmer_report()` — render an HTML or PDF diagnostic report. When
+   passed a `calmer_suite`, ranks all variants by AIC + BIC + Nagelkerke
+   pseudo-R², picks the model with the smallest average rank, re-scores
+   against the picked model, and runs the per-model diagnostic sections
+   against the picked fit.
 
 # End-to-end pipeline on bundled example data
 
@@ -70,8 +80,9 @@ library(gamlss)   # so pb() resolves in user-supplied formulas
 
 ex <- calmer_example_data()
 
-# Compute the per-transcript paralog status table (cached PAF in the
-# bundle; in production this would invoke minimap2 once per annotation).
+# Compute the per-transcript paralog table (cached PAF in the bundle;
+# in production this would invoke minimap2 once per annotation).
+# The output is a 3-column table (transcript_id, gene_id, has_paralog).
 paralog <- make_paralog_table(
     fasta    = ex$fasta,
     gtf      = ex$gtf,
@@ -82,32 +93,33 @@ features <- extract_features(ex$bam, ex$gtf, ex$fasta,
                              paralog_table = paralog)
 clean    <- clean_features(features)
 
-# pb() smoothers with a coarse 4-knot basis (inter = 4) on the four
-# context predictors, plus a linear paralog term. The default pb() basis
-# (inter = 20) is too flexible for the ~600-read bundled example and
-# produces knot-driven wiggles in the partial-effects panels; a 4-knot
-# basis keeps the smoother shape parameteric-like while still allowing
-# mild non-linearity. On a real run with tens of thousands of reads,
-# drop inter back to its default.
-mu_rhs   <- y ~ pb(n_isoforms_sc,  inter = 4) + pb(tx_length_sc,   inter = 4) +
-                pb(gc_content_sc,  inter = 4) + pb(pct_covered_sc, inter = 4) +
-                max_pct_id_sc
-nu_rhs   <-   ~ pb(n_isoforms_sc,  inter = 4) + pb(tx_length_sc,   inter = 4) +
-                pb(gc_content_sc,  inter = 4) + pb(pct_covered_sc, inter = 4) +
-                max_pct_id_sc
+# A coarse 4-knot basis (inter = 4) on the three scaled predictors, plus
+# the two-piece basis on n_isoforms and a linear has_paralog term. The
+# default inter = 5 is fine for real data; we use a smaller basis here
+# for the ~600-read bundled example to avoid knot-driven wiggles.
+mu_rhs <- y ~ pb(tx_length_sc,   inter = 4) +
+              pb(gc_content_sc,  inter = 4) +
+              pb(pct_covered_sc, inter = 4) +
+              n_isoforms + I(pmax(n_isoforms - 5, 0)) +
+              has_paralog
+nu_rhs <-   ~ pb(tx_length_sc,   inter = 4) +
+              pb(gc_content_sc,  inter = 4) +
+              pb(pct_covered_sc, inter = 4) +
+              n_isoforms + I(pmax(n_isoforms - 5, 0)) +
+              has_paralog
 
 fit <- fit_beinf(
     clean, n = nrow(clean),
-    predictors    = c("n_isoforms", "tx_length", "gc_content",
-                      "pct_covered", "max_pct_id"),
-    formula       = mu_rhs,
-    sigma_formula = ~ 1,
-    nu_formula    = nu_rhs,
-    tau_formula   = nu_rhs
+    scaled_predictors    = c("tx_length", "gc_content", "pct_covered"),
+    piecewise_predictors = list(n_isoforms = 5),
+    linear_predictors    = c("has_paralog"),
+    formula              = mu_rhs,
+    sigma_formula        = ~ 1,
+    nu_formula           = nu_rhs,
+    tau_formula          = nu_rhs
 )
 
-scored <- score_reads(features, fit, filter_method = "mad",
-                      threshold = -3)
+scored <- score_reads(clean, fit, filter_method = "mad", threshold = -3)
 ```
 
 # Filtered outputs
@@ -156,16 +168,23 @@ cat("\n</div>\n")
 The chunk below pulls in `inst/rmd/diagnostic_report.Rmd` as a child
 document and renders it inline as part of this vignette. All sections
 of the standalone report — predictor definitions, training summary,
-model fit, model comparison, residual diagnostics, partial effects,
-scoring summary, where flags landed — appear below.
+model fit, model comparison (only if a suite was supplied), residual
+diagnostics, partial effects, the coefficient forest plot, scoring
+summary, and where flags landed — appear below.
 
 ```{r setup-report-params, include = FALSE}
-# The report Rmd reads `params$fit`, `params$scored`, `params$sample_name`.
+# The report Rmd reads `params$fit`, `params$suite`, `params$scored`,
+# `params$rank_table`, `params$picked_name`, and `params$sample_name`.
 # When run as a child document, no params block is processed, so we
 # define `params` in the parent environment and the child picks it up.
+# For a single-fit vignette example, suite/rank_table/picked_name are
+# NULL; the report's single-fit branches handle that.
 params <- list(
     fit         = fit,
+    suite       = NULL,
     scored      = scored,
+    rank_table  = NULL,
+    picked_name = NULL,
     sample_name = "vignette example (paralog-aware)"
 )
 ```

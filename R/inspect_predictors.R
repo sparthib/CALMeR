@@ -12,17 +12,14 @@
 #' }
 #'
 #' Quantile values and per-level proportions are returned invisibly so the
-#' user can paste them into [clean_features()] (e.g. `gc_range`,
-#' `tx_length_range`, `max_n_isoforms`).
+#' user can use them when picking `max_n_isoforms` or
+#' `pct_covered_winsor_bounds` for [clean_features()].
 #'
 #' Typical workflow:
 #' \preformatted{
 #'   features <- extract_features(bam, gtf, fasta)
-#'   info     <- inspect_predictors(features)   # inspect raw, set bounds
-#'   clean    <- clean_features(features,
-#'                              gc_range        = c(35, 65),
-#'                              tx_length_range = c(200, 8000),
-#'                              max_n_isoforms  = 8)
+#'   info     <- inspect_predictors(features)   # inspect raw distributions
+#'   clean    <- clean_features(features, max_n_isoforms = 7)
 #'   fit      <- fit_beinf(clean)
 #' }
 #'

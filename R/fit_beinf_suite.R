@@ -1,33 +1,36 @@
 #' Fit a suite of BEINF models for model comparison
 #'
-#' Convenience wrapper that fits up to five BEINF models on the same
+#' Convenience wrapper that fits up to 12 BEINF models on the same
 #' training data and returns them as a single `calmer_suite` object.
-#' Useful for comparing flexible (penalized B-spline) vs. linear
-#' parametrisations, with and without paralog context.
-#'
-#' By default the suite contains five named fits:
+#' The grid crosses three axes:
 #' \describe{
-#'   \item{`pb_paralog`}{`pb(., inter = n_knots)` on the four canonical
-#'         features **plus a linear term in `max_pct_id`**. The paralog
-#'         predictor is intentionally not wrapped in `pb()` because
-#'         `max_pct_id` is highly zero-inflated (most transcripts have
-#'         no paralog), which destabilises spline fits. Fitted only if
-#'         `max_pct_id` is present on `features`.}
-#'   \item{`pb_paralog_interact`}{Same as `pb_paralog` plus a
-#'         linear-by-linear interaction `tx_length_sc:pct_covered_sc`.
-#'         Tests whether the relationship between coverage and read
-#'         quality depends on transcript length on top of the marginal
-#'         non-linear effects already captured by `pb()`. Same paralog
-#'         requirement as `pb_paralog`.}
-#'   \item{`pb_no_paralog`}{`pb(., inter = n_knots)` on the four
-#'         canonical features.}
-#'   \item{`linear_paralog`}{Linear terms on all five predictors
-#'         (including `max_pct_id`). Same paralog requirement.}
-#'   \item{`linear_no_paralog`}{Linear terms on the four canonical
-#'         features.}
+#'   \item{Smoother for the scaled predictors}{`pb()` penalized
+#'         B-spline vs plain linear.}
+#'   \item{Interaction term}{none, `tx_length_sc:n_isoforms` (length by
+#'         isoform count), or `tx_length_sc:pct_covered_sc` (length by
+#'         coverage). All interactions are linear-by-linear cross terms
+#'         on top of the marginal main effects; they test whether the
+#'         interaction adds anything beyond the marginals.}
+#'   \item{Paralog}{`linear_predictors` (default `has_paralog`)
+#'         included vs omitted.}
 #' }
-#' If `user_formula` is non-`NULL`, a fifth fit named `"user"` is added
-#' using exactly the formulas supplied.
+#' Across every variant, `piecewise_predictors` (default `n_isoforms`
+#' with a knot at 5) enters as the two-piece linear basis; it is not
+#' swapped for `pb()` because seven distinct values can't support a
+#' useful smooth (see `vignette` / [fit_beinf()] docs).
+#'
+#' Variant names follow the pattern
+#' `<smoother>_<paralog>[_<interaction>]`:
+#' \itemize{
+#'   \item `pb_paralog`, `pb_paralog_x_niso`, `pb_paralog_x_pcov`
+#'   \item `pb_no_paralog`, `pb_no_paralog_x_niso`, `pb_no_paralog_x_pcov`
+#'   \item `linear_paralog`, `linear_paralog_x_niso`, `linear_paralog_x_pcov`
+#'   \item `linear_no_paralog`, `linear_no_paralog_x_niso`, `linear_no_paralog_x_pcov`
+#' }
+#' where `_x_niso` adds `tx_length_sc:n_isoforms` and `_x_pcov` adds
+#' `tx_length_sc:pct_covered_sc`. Variants whose required predictors
+#' are absent from `features` (or from `scaled_predictors` /
+#' `piecewise_predictors`) are skipped with a message.
 #'
 #' Primary fit (the one used by [score_reads()] and [filter_bam()]
 #' when the suite is passed in):
@@ -37,30 +40,30 @@
 #'   \item otherwise `"pb_no_paralog"`.
 #' }
 #'
-#' Fitting five to six BEINF models is several times slower than
-#' fitting one. Plan accordingly when calling from an array job.
+#' Fitting a dozen BEINF models is several times slower than fitting
+#' one. Plan accordingly when calling from an array job.
 #'
 #' @param features Cleaned training data frame from [clean_features()].
-#' @param predictors_with_paralog Character vector of predictors for
-#'   the `*_paralog` variants. Default
-#'   `c("n_isoforms", "tx_length", "gc_content", "pct_covered", "max_pct_id")`.
-#' @param predictors_no_paralog Character vector of predictors for
-#'   the `*_no_paralog` variants. Default
-#'   `c("n_isoforms", "tx_length", "gc_content", "pct_covered")`.
+#' @param scaled_predictors,piecewise_predictors,linear_predictors
+#'   Forwarded to [fit_beinf()]; see its docstring for the exact
+#'   semantics. Defaults match the canonical CALMeR pipeline
+#'   (`tx_length`, `gc_content`, `pct_covered` scaled; `n_isoforms`
+#'   piecewise at knot 5; `has_paralog` linear).
 #' @param user_formula,user_sigma_formula,user_nu_formula,user_tau_formula
 #'   Optional gamlss formulas for an additional user-defined fit. If
 #'   `user_formula` is `NULL`, no user fit is added. If non-`NULL`, the
 #'   sigma/nu/tau formulas default to the same RHS as `user_formula`
 #'   (via [fit_beinf()]'s own defaulting).
-#' @param n_knots Integer passed to `pb(., inter = n_knots)` for the
-#'   penalized-spline variants. Default 5.
+#' @param inter Integer; number of equal-spaced intervals for each
+#'   penalized B-spline term in the `pb_*` variants. Forwarded to the
+#'   `inter` argument of [gamlss::pb()]. Default 5.
 #' @param min_paralog_in_sample Integer floor. Before fitting the
-#'   paralog variants, the function estimates the expected number of
-#'   paralog reads (`max_pct_id > 0`) in the random training subset.
-#'   If that estimate falls below `min_paralog_in_sample`, a warning is
-#'   emitted (the variants are still fitted; the warning just flags
-#'   that the paralog coefficient may be noisy or unidentified).
-#'   Default 100. Set to 0 to disable.
+#'   `*_paralog` variants, the function estimates the expected number
+#'   of paralog reads (`has_paralog == TRUE`) in the random training
+#'   subset. If that estimate falls below `min_paralog_in_sample`, a
+#'   warning is emitted (the variants are still fitted; the warning
+#'   just flags that the paralog coefficient may be noisy or
+#'   unidentified). Default 100. Set to 0 to disable.
 #' @param n,seed,trace Forwarded to [fit_beinf()].
 #'
 #' @return An object of class `"calmer_suite"`: a named list of
@@ -70,8 +73,9 @@
 #' @examples
 #' \dontrun{
 #'   ex       <- calmer_example_data()
+#'   paralog  <- make_paralog_table(ex$fasta, ex$gtf, paf_path = ex$paf)
 #'   features <- extract_features(ex$bam, ex$gtf, ex$fasta,
-#'                                paralog_table = my_paralog_tsv)
+#'                                paralog_table = paralog)
 #'   clean    <- clean_features(features)
 #'   suite    <- fit_beinf_suite(clean, n = 5000)
 #'   scored   <- score_reads(clean, suite)        # uses primary fit
@@ -82,51 +86,51 @@
 #' @seealso [fit_beinf()], [calmer_report()], [score_reads()].
 #' @export
 fit_beinf_suite <- function(features,
-                            predictors_with_paralog = c("n_isoforms", "tx_length",
-                                                         "gc_content", "pct_covered",
-                                                         "max_pct_id"),
-                            predictors_no_paralog   = c("n_isoforms", "tx_length",
-                                                         "gc_content", "pct_covered"),
-                            user_formula            = NULL,
-                            user_sigma_formula      = NULL,
-                            user_nu_formula         = NULL,
-                            user_tau_formula        = NULL,
-                            n_knots                 = 5,
-                            n                       = 50000,
-                            seed                    = 42,
-                            min_paralog_in_sample   = 100,
-                            trace                   = FALSE) {
+                            scaled_predictors     = c("tx_length", "gc_content",
+                                                      "pct_covered"),
+                            piecewise_predictors  = list(n_isoforms = 5),
+                            linear_predictors     = c("has_paralog"),
+                            user_formula          = NULL,
+                            user_sigma_formula    = NULL,
+                            user_nu_formula       = NULL,
+                            user_tau_formula      = NULL,
+                            inter               = 5,
+                            n                     = 50000,
+                            seed                  = 42,
+                            min_paralog_in_sample = 100,
+                            trace                 = FALSE) {
   stopifnot(is.data.frame(features))
 
-  paralog_ok <- all(predictors_with_paralog %in% names(features))
-  if (!paralog_ok) {
-    missing <- setdiff(predictors_with_paralog, names(features))
+  paralog_cols_present <- length(linear_predictors) == 0L ||
+                          all(linear_predictors %in% names(features))
+  if (!paralog_cols_present) {
+    missing <- setdiff(linear_predictors, names(features))
     message(sprintf(
       "fit_beinf_suite: paralog variants skipped (missing predictor%s: %s).",
-      if (length(missing) > 1) "s" else "",
+      if (length(missing) > 1L) "s" else "",
       paste(missing, collapse = ", ")
     ))
   }
 
-  # When fitting paralog variants, fit_beinf() will sample n primaries
-  # uniformly. If paralog reads are rare in the population, the sample
-  # may contain very few of them, producing a noisy or unidentified
-  # paralog coefficient. Surface this up front rather than letting the
-  # user discover it from a near-zero coefficient in the report.
-  if (paralog_ok && "max_pct_id" %in% names(features)) {
+  # Surface the paralog-prevalence concern up front. When
+  # `has_paralog` is rare in the training population, the random
+  # training subset may contain very few TRUE rows, producing a noisy
+  # or unidentified linear coefficient on `has_paralog`.
+  if (paralog_cols_present && "has_paralog" %in% linear_predictors &&
+      "has_paralog" %in% names(features)) {
     primary_mask     <- features$aln_type == "P"
     n_primary        <- sum(primary_mask, na.rm = TRUE)
-    n_paralog        <- sum(primary_mask & features$max_pct_id > 0,
+    n_paralog        <- sum(primary_mask & features$has_paralog,
                             na.rm = TRUE)
     pop_frac         <- if (n_primary > 0) n_paralog / n_primary else 0
     expected_in_samp <- min(n, n_primary) * pop_frac
     if (expected_in_samp < min_paralog_in_sample) {
       warning(sprintf(
-        paste0("fit_beinf_suite: expected ~%d paralog reads (max_pct_id > 0) in ",
-               "the %d-read training subset (population fraction = %.4f%%). ",
+        paste0("fit_beinf_suite: expected ~%d paralog reads (has_paralog == TRUE) ",
+               "in the %d-read training subset (population fraction = %.4f%%). ",
                "This is below min_paralog_in_sample = %d; the paralog ",
                "coefficient in pb_paralog / linear_paralog may be ",
-               "unreliable. Consider raising `n` or treating max_pct_id ",
+               "unreliable. Consider raising `n` or treating has_paralog ",
                "as informative only when paralog reads are abundant."),
         round(expected_in_samp), n, 100 * pop_frac,
         min_paralog_in_sample
@@ -134,131 +138,110 @@ fit_beinf_suite <- function(features,
     }
   }
 
-  build_linear_formula <- function(preds, response = "y") {
-    rhs <- paste(paste0(preds, "_sc"), collapse = " + ")
-    list(
-      mu    = stats::as.formula(paste(response, "~", rhs)),
-      sigma = stats::as.formula(paste("~", rhs)),
-      nu    = stats::as.formula(paste("~", rhs)),
-      tau   = stats::as.formula(paste("~", rhs))
+  build_formulas <- function(scaled, piecewise, linear, smoother, extra = NULL) {
+    rhs <- .build_three_class_rhs(
+      scaled_predictors    = scaled,
+      piecewise_predictors = piecewise,
+      linear_predictors    = linear,
+      inter              = inter,
+      smoother             = smoother
     )
+    if (!is.null(extra) && nzchar(extra)) rhs <- paste(rhs, "+", extra)
+    list(
+      mu    = stats::as.formula(paste("y ~", rhs)),
+      sigma = stats::as.formula(paste("~",   rhs)),
+      nu    = stats::as.formula(paste("~",   rhs)),
+      tau   = stats::as.formula(paste("~",   rhs))
+    )
+  }
+
+  fit_with <- function(scaled, piecewise, linear, formulas) {
+    fit_beinf(features,
+              scaled_predictors    = scaled,
+              piecewise_predictors = piecewise,
+              linear_predictors    = linear,
+              formula              = formulas$mu,
+              sigma_formula        = formulas$sigma,
+              nu_formula           = formulas$nu,
+              tau_formula          = formulas$tau,
+              n                    = n,
+              seed                 = seed,
+              trace                = trace)
+  }
+
+  # Axes of the variant grid.
+  smoothers <- c("pb", "linear")
+  interactions <- list(
+    list(suffix = "",        extra = NULL),
+    list(suffix = "_x_niso", extra = "tx_length_sc:n_isoforms"),
+    list(suffix = "_x_pcov", extra = "tx_length_sc:pct_covered_sc")
+  )
+  paralog_axes <- list(
+    list(suffix = "_paralog",    linear = linear_predictors,
+         enabled = paralog_cols_present && length(linear_predictors) > 0L),
+    list(suffix = "_no_paralog", linear = character(0),
+         enabled = TRUE)
+  )
+
+  # Defensive: an interaction is only fitted when its constituent
+  # predictors are actually in the model (so the formula resolves).
+  has_tx_sc      <- "tx_length"   %in% scaled_predictors
+  has_pcov_sc    <- "pct_covered" %in% scaled_predictors
+  has_n_isoforms <- "n_isoforms"  %in% c(scaled_predictors,
+                                         names(piecewise_predictors),
+                                         linear_predictors)
+  interaction_ok <- function(extra) {
+    if (is.null(extra)) return(TRUE)
+    if (grepl("tx_length_sc", extra, fixed = TRUE) && !has_tx_sc)
+      return(FALSE)
+    if (grepl("pct_covered_sc", extra, fixed = TRUE) && !has_pcov_sc)
+      return(FALSE)
+    if (grepl("n_isoforms", extra, fixed = TRUE) && !has_n_isoforms)
+      return(FALSE)
+    TRUE
   }
 
   fits <- list()
-
-  if (paralog_ok) {
-    # Hybrid: pb() on the canonical four predictors + linear max_pct_id.
-    # `max_pct_id` is intentionally not in pb() because the column is
-    # heavily zero-inflated (most transcripts have no paralog), and a
-    # penalized spline on a near-degenerate predictor fits poorly.
-    message("  fitting pb_paralog (hybrid: pb on canonical 4 + linear max_pct_id) ...")
-    np_sc       <- paste0(predictors_no_paralog, "_sc")
-    paralog_sc  <- setdiff(paste0(predictors_with_paralog, "_sc"), np_sc)
-    pb_terms    <- paste0("pb(", np_sc, ", inter = ", n_knots, ")",
-                          collapse = " + ")
-    hybrid_rhs  <- if (length(paralog_sc) > 0L) {
-      paste(pb_terms, "+", paste(paralog_sc, collapse = " + "))
-    } else {
-      pb_terms
-    }
-    hf <- list(
-      mu    = stats::as.formula(paste("y ~", hybrid_rhs)),
-      sigma = stats::as.formula(paste("~",   hybrid_rhs)),
-      nu    = stats::as.formula(paste("~",   hybrid_rhs)),
-      tau   = stats::as.formula(paste("~",   hybrid_rhs))
-    )
-    fits$pb_paralog <- fit_beinf(features,
-                                 predictors    = predictors_with_paralog,
-                                 formula       = hf$mu,
-                                 sigma_formula = hf$sigma,
-                                 nu_formula    = hf$nu,
-                                 tau_formula   = hf$tau,
-                                 n             = n,
-                                 seed          = seed,
-                                 trace         = trace)
-
-    # Same hybrid backbone as pb_paralog, plus a linear-by-linear
-    # interaction between tx_length and pct_covered. Tests whether the
-    # coverage-vs-quality relationship shifts with transcript length on
-    # top of what the marginal pb() splines already explain.
-    if (all(c("tx_length_sc", "pct_covered_sc") %in%
-            c(np_sc, paralog_sc))) {
-      message("  fitting pb_paralog_interact (pb_paralog + tx_length:pct_covered) ...")
-      interact_rhs <- paste(hybrid_rhs, "+ tx_length_sc:pct_covered_sc")
-      hif <- list(
-        mu    = stats::as.formula(paste("y ~", interact_rhs)),
-        sigma = stats::as.formula(paste("~",   interact_rhs)),
-        nu    = stats::as.formula(paste("~",   interact_rhs)),
-        tau   = stats::as.formula(paste("~",   interact_rhs))
-      )
-      fits$pb_paralog_interact <- fit_beinf(features,
-                                            predictors    = predictors_with_paralog,
-                                            formula       = hif$mu,
-                                            sigma_formula = hif$sigma,
-                                            nu_formula    = hif$nu,
-                                            tau_formula   = hif$tau,
-                                            n             = n,
-                                            seed          = seed,
-                                            trace         = trace)
-    } else {
-      message("  skipping pb_paralog_interact (tx_length/pct_covered not in predictor set).")
+  for (sm in smoothers) {
+    for (psp in paralog_axes) {
+      if (!psp$enabled) next
+      for (isp in interactions) {
+        if (!interaction_ok(isp$extra)) {
+          message(sprintf(
+            "  skipping %s%s%s (required predictors not in the model).",
+            sm, psp$suffix, isp$suffix
+          ))
+          next
+        }
+        name <- paste0(sm, psp$suffix, isp$suffix)
+        message(sprintf("  fitting %s ...", name))
+        f <- build_formulas(scaled_predictors, piecewise_predictors,
+                            psp$linear, smoother = sm, extra = isp$extra)
+        fits[[name]] <- fit_with(scaled_predictors, piecewise_predictors,
+                                 psp$linear, f)
+      }
     }
   }
-
-  message("  fitting pb_no_paralog ...")
-  fits$pb_no_paralog <- fit_beinf(features,
-                                  predictors = predictors_no_paralog,
-                                  n_knots    = n_knots,
-                                  n          = n,
-                                  seed       = seed,
-                                  trace      = trace)
-
-  if (paralog_ok) {
-    message("  fitting linear_paralog ...")
-    lf <- build_linear_formula(predictors_with_paralog)
-    fits$linear_paralog <- fit_beinf(features,
-                                     predictors    = predictors_with_paralog,
-                                     formula       = lf$mu,
-                                     sigma_formula = lf$sigma,
-                                     nu_formula    = lf$nu,
-                                     tau_formula   = lf$tau,
-                                     n             = n,
-                                     seed          = seed,
-                                     trace         = trace)
-  }
-
-  message("  fitting linear_no_paralog ...")
-  lf <- build_linear_formula(predictors_no_paralog)
-  fits$linear_no_paralog <- fit_beinf(features,
-                                      predictors    = predictors_no_paralog,
-                                      formula       = lf$mu,
-                                      sigma_formula = lf$sigma,
-                                      nu_formula    = lf$nu,
-                                      tau_formula   = lf$tau,
-                                      n             = n,
-                                      seed          = seed,
-                                      trace         = trace)
 
   if (!is.null(user_formula)) {
     message("  fitting user ...")
-    # fit_beinf() requires `predictors` to map terms onto column names
-    # for scaling. Best-effort guess: union of the canonical four with
-    # paralog if present in features.
-    user_preds <- if (paralog_ok) predictors_with_paralog else predictors_no_paralog
+    user_linear <- if (paralog_cols_present) linear_predictors else character(0)
     fits$user <- fit_beinf(features,
-                           predictors    = user_preds,
-                           formula       = user_formula,
-                           sigma_formula = user_sigma_formula,
-                           nu_formula    = user_nu_formula,
-                           tau_formula   = user_tau_formula,
-                           n             = n,
-                           seed          = seed,
-                           trace         = trace)
+                           scaled_predictors    = scaled_predictors,
+                           piecewise_predictors = piecewise_predictors,
+                           linear_predictors    = user_linear,
+                           formula              = user_formula,
+                           sigma_formula        = user_sigma_formula,
+                           nu_formula           = user_nu_formula,
+                           tau_formula          = user_tau_formula,
+                           n                    = n,
+                           seed                 = seed,
+                           trace                = trace)
   }
 
   primary <- if (!is.null(user_formula)) {
     "user"
-  } else if (paralog_ok) {
+  } else if ("pb_paralog" %in% names(fits)) {
     "pb_paralog"
   } else {
     "pb_no_paralog"

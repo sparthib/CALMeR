@@ -5,6 +5,26 @@
 #' randomized quantile residual (RQR) and flags reads with anomalously
 #' low residuals.
 #'
+#' Preprocessing must be consistent between training and scoring data.
+#' The expected pattern is: clean the training data with
+#' [clean_features()], fit with [fit_beinf()] or [fit_beinf_suite()],
+#' then clean the scoring data with the **same** transforms — including
+#' the training winsorize bounds stored on the fit
+#' (`fit$winsor_bounds`):
+#' \preformatted{
+#'   clean_train <- clean_features(features)
+#'   fit         <- fit_beinf(clean_train)
+#'   clean_test  <- clean_features(
+#'     features,
+#'     pct_covered_winsor_bounds = fit$winsor_bounds
+#'   )
+#'   scored      <- score_reads(clean_test, fit)
+#' }
+#' Inside `score_reads`, only the z-score step is re-applied (using
+#' `fit$scale_params` on `scaled_predictors`); the log / winsorize /
+#' lump-at-7 transforms are expected to already be in place on the
+#' input.
+#'
 #' For continuous response values (MAPQ in 1..59), the RQR is the
 #' standard normal quantile of the model CDF at that value. For point
 #' masses (MAPQ = 0 or MAPQ = 60), the residual is randomized over the
@@ -34,9 +54,14 @@
 #'
 #' Reads with `NA` in any required predictor are kept in the output but
 #' assigned `rqr = NA` and `flag_low = FALSE` (i.e. retained by default).
+#' Reads with at least one predictor outside the training-data range
+#' are marked `out_of_range = TRUE` and not scored, since the model's
+#' cubic-spline extrapolation is unreliable beyond the training domain.
 #'
-#' @param features Data frame from [extract_features()] (typically the
-#'   full set, not just the training subset).
+#' @param features Data frame from [clean_features()] (or
+#'   [extract_features()] if no cleaning is needed). Must contain all
+#'   predictors used by the fit, transformed the same way as the
+#'   training data.
 #' @param fit Either a single `calmer_fit` returned by [fit_beinf()],
 #'   or a `calmer_suite` returned by [fit_beinf_suite()]. If a suite is
 #'   supplied, the suite's primary fit is used.
@@ -56,11 +81,6 @@
 #' @param primary_only Logical; if `TRUE` (default) score only primary
 #'   alignments. Secondary alignments inherit `flag_low = FALSE`.
 #'
-#' Reads with at least one predictor outside the training-data range
-#'   are marked as `out_of_range = TRUE` and not scored, since the
-#'   model's cubic-spline extrapolation is unreliable beyond the
-#'   data it saw during fitting.
-#'
 #' @return A data frame with the input columns plus `mu_p`, `sigma_p`,
 #'   `nu_p`, `tau_p`, `p0_hat`, `p1_hat`, `rqr`, `dev_zero`,
 #'   `flag_low`, `flag_source` (one of `"rqr_low"`, `"p0_dev_high"`,
@@ -69,14 +89,17 @@
 #'
 #' @examples
 #' ex       <- calmer_example_data()
-#' features <- extract_features(ex$bam, ex$gtf, ex$fasta)
+#' paralog  <- make_paralog_table(ex$fasta, ex$gtf, paf_path = ex$paf)
+#' features <- extract_features(ex$bam, ex$gtf, ex$fasta,
+#'                              paralog_table = paralog)
 #' clean    <- clean_features(features)
 #' fit <- fit_beinf(
 #'   clean, n = 1000,
-#'   formula       = y ~ n_isoforms_sc + tx_length_sc + gc_content_sc + pct_covered_sc,
+#'   formula       = y ~ tx_length_sc + gc_content_sc + pct_covered_sc +
+#'                       n_isoforms + I(pmax(n_isoforms - 5, 0)) + has_paralog,
 #'   sigma_formula = ~ 1, nu_formula = ~ 1, tau_formula = ~ 1
 #' )
-#' scored <- score_reads(features, fit,
+#' scored <- score_reads(clean, fit,
 #'                       filter_method = "mad", threshold = -3)
 #' table(scored$flag_low)
 #'
@@ -104,11 +127,15 @@ score_reads <- function(features,
     is.numeric(threshold), length(threshold) == 1L
   )
 
-  predictors    <- fit$predictors
-  predictors_sc <- paste0(predictors, "_sc")
-  scale_params  <- fit$scale_params
+  scaled_predictors    <- fit$scaled_predictors
+  piecewise_predictors <- fit$piecewise_predictors
+  linear_predictors    <- fit$linear_predictors
+  all_predictors       <- fit$predictors
+  scale_params         <- fit$scale_params
 
-  for (p in predictors) {
+  # Re-apply z-scoring to the scaled predictors using training params.
+  # Piecewise and linear predictors enter raw.
+  for (p in scaled_predictors) {
     features[[paste0(p, "_sc")]] <- apply_scale(features[[p]],
                                                 scale_params[[p]])
   }
@@ -126,14 +153,18 @@ score_reads <- function(features,
   features$flag_source <- "none"
 
   scorable <- stats::complete.cases(
-    features[, c("MAPQ", predictors, predictors_sc), drop = FALSE]
+    features[, c("MAPQ", all_predictors), drop = FALSE]
   )
   if (primary_only && "aln_type" %in% names(features)) {
     scorable <- scorable & (features$aln_type == "P")
   }
 
+  # Out-of-range check against the training-data range, for every
+  # predictor (scaled, piecewise, and linear). Logical predictors
+  # naturally pass the [0, 1] check; piecewise/lumped predictors are
+  # only out-of-range if cleaning was inconsistent with training.
   features$out_of_range <- FALSE
-  for (p in predictors) {
+  for (p in all_predictors) {
     rng     <- range(fit$training_data[[p]], na.rm = TRUE)
     too_low <- !is.na(features[[p]]) & features[[p]] < rng[1]
     too_hi  <- !is.na(features[[p]]) & features[[p]] > rng[2]
@@ -154,9 +185,12 @@ score_reads <- function(features,
     return(features)
   }
 
-  newdata <- features[scorable,
-                      unique(c(predictors, predictors_sc, "y")),
-                      drop = FALSE]
+  # newdata for predict.gamlss: needs every column referenced in the
+  # model formula. pb(<x>_sc) wants <x>_sc; bare piecewise/linear
+  # terms (and the I(pmax(...)) basis) want the raw predictor names.
+  scaled_sc    <- paste0(scaled_predictors, "_sc")
+  newdata_cols <- unique(c(all_predictors, scaled_sc, "y"))
+  newdata      <- features[scorable, newdata_cols, drop = FALSE]
 
   mu_p    <- stats::predict(fit$fit, newdata = newdata, what = "mu",
                             type = "response", data = fit$training_data)

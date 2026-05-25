@@ -7,9 +7,11 @@
 clean_features(
   features,
   primary_only = TRUE,
-  max_n_isoforms = 10,
-  gc_range = c(30, 70),
-  tx_length_range = c(100, 10000),
+  max_n_isoforms = 7L,
+  log_tx_length = TRUE,
+  winsorize_pct_covered = TRUE,
+  pct_covered_winsor_probs = c(0.01, 0.99),
+  pct_covered_winsor_bounds = NULL,
   mode = c("clamp", "drop"),
   required = c("n_isoforms", "tx_length", "gc_content", "pct_covered"),
   verbose = FALSE
@@ -20,59 +22,82 @@ clean_features(
 
 \item{primary_only}{Logical; keep only primary alignments. Default \code{TRUE}.}
 
-\item{max_n_isoforms}{Integer upper bound for \code{n_isoforms}. Default
-\code{10}. Set \code{NULL} to disable.}
+\item{max_n_isoforms}{Integer cap for \code{n_isoforms} (lump at this
+value). Default \code{7L}. Set \code{NULL} to disable.}
 
-\item{gc_range}{Numeric length-2; inclusive \code{c(low, high)} percent G+C.
-Default \code{c(30, 70)}. Set \code{NULL} to disable.}
+\item{log_tx_length}{Logical; if \code{TRUE} (default), overwrite
+\code{tx_length} in place with \code{log(tx_length)}. Requires all values
+to be strictly positive.}
 
-\item{tx_length_range}{Numeric length-2; inclusive \code{c(min, max)}
-transcript length in nucleotides. Default \code{c(100, 10000)}. Set
-\code{NULL} to disable.}
+\item{winsorize_pct_covered}{Logical; if \code{TRUE} (default), clip
+\code{pct_covered} to \code{pct_covered_winsor_bounds} (or to the
+data-driven quantiles at \code{pct_covered_winsor_probs} when bounds
+are \code{NULL}).}
+
+\item{pct_covered_winsor_probs}{Length-2 numeric in (0, 1); the
+quantiles to use when winsorize bounds are not supplied.
+Default \code{c(0.01, 0.99)}.}
+
+\item{pct_covered_winsor_bounds}{Optional length-2 numeric; if
+supplied, used as the lower/upper clip bounds for \code{pct_covered}
+without recomputing quantiles. Use this to apply training bounds
+to a scoring set.}
 
 \item{mode}{Either \code{"clamp"} (default) or \code{"drop"}. Controls how
-\code{max_n_isoforms}, \code{gc_range}, and \code{tx_length_range} are applied.}
+\code{max_n_isoforms} is applied: \code{"clamp"} lumps values above the cap
+down to the cap; \code{"drop"} removes those rows.}
 
-\item{required}{Character vector of additional columns that must be
-non-NA. Defaults to the four canonical predictors.}
+\item{required}{Character vector of additional columns that must
+be non-NA. Defaults to the four canonical predictors.}
 
 \item{verbose}{Logical; print row counts (and clamp counts, if any)
 after each step.}
 }
 \value{
-A data frame with the same rows as \code{features} minus any
-dropped by \code{primary_only} / NA / \code{mode = "drop"} filtering, and
-with predictor columns clamped if \code{mode = "clamp"}.
+A data frame with predictor columns transformed in place
+per the steps above. When \code{winsorize_pct_covered = TRUE}, the
+returned data frame has attribute \code{"pct_covered_winsor_bounds"}
+set to the length-2 numeric used.
 }
 \description{
-Prepares a feature table for \code{\link[=fit_beinf]{fit_beinf()}} and \code{\link[=score_reads]{score_reads()}}. By
-default the range-style arguments \strong{clamp} values to their bounds
-(so no rows are dropped due to a single out-of-range predictor); set
-\code{mode = "drop"} to fall back to the legacy row-dropping behaviour.
-}
-\details{
-Filters and transforms (in order):
+Applies the CALMeR canonical preprocessing pipeline to a feature
+table from \code{\link[=extract_features]{extract_features()}}, in this order:
 \enumerate{
 \item Drop secondary/supplementary if \code{primary_only = TRUE}.
 \item Drop rows with \code{NA} in \code{MAPQ} or any column listed in
-\code{required} (NA cannot be clamped).
-\item \code{n_isoforms}: clamp to \verb{[1, max_n_isoforms]} (or drop above
-the cap if \code{mode = "drop"}).
-\item \code{gc_content}: clamp to \code{gc_range} (or drop outside).
-\item \code{tx_length}:  clamp to \code{tx_length_range} (or drop outside).
+\code{required}.
+\item \code{n_isoforms}: lump at \code{max_n_isoforms} (default 7) by
+clamping (or drop above the cap if \code{mode = "drop"}).
+\item \code{tx_length}:  natural-log in place if \code{log_tx_length = TRUE}.
+\item \code{pct_covered}: winsorize to the supplied or data-driven
+quantile bounds if \code{winsorize_pct_covered = TRUE}.
 }
+}
+\details{
+This function performs only the variable-specific transforms ("step
+1" of the spec). Z-scoring of the smoothed predictors is applied
+downstream in \code{\link[=fit_beinf]{fit_beinf()}} (and mirrored in \code{\link[=score_reads]{score_reads()}}) using
+parameters computed on the training data, so it is not done here.
 
-Using \code{mode = "clamp"} (the default) is recommended when the same
-table will be used for both \code{\link[=fit_beinf]{fit_beinf()}} (training) and
-\code{\link[=score_reads]{score_reads()}} (scoring). Out-of-bound reads get scored against the
-fitted model at the boundary value rather than via spline
-extrapolation past the training domain.
+Defaults are opinionated to match the BEINF model used downstream:
+\code{tx_length} is log-transformed (its dynamic range otherwise
+dominates the z-score), \code{pct_covered} is winsorized (the 0-100 bound
+concentrates mass near 100 with rare extreme low values), and
+\code{n_isoforms} is lumped at 7 because the upper tail is sparse and the
+variable enters the model as a piecewise linear term, not as a
+smooth.
+
+When winsorizing data-drivenly, the bounds used are attached as
+attribute \code{"pct_covered_winsor_bounds"} on the returned data frame.
+Pass those same bounds back via \code{pct_covered_winsor_bounds} when
+cleaning a test/scoring set to apply the training cutoffs rather
+than recomputing on the new data.
 }
 \examples{
 ex       <- calmer_example_data()
 features <- extract_features(ex$bam, ex$gtf, ex$fasta)
-clean    <- clean_features(features)         # clamp (default)
+clean    <- clean_features(features)
 nrow(features); nrow(clean)
-clean_drop <- clean_features(features, mode = "drop")  # legacy
+attr(clean, "pct_covered_winsor_bounds")
 
 }

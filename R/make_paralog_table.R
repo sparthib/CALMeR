@@ -1,15 +1,20 @@
 #' Compute a per-transcript paralog status table via minimap2 self-alignment
 #'
-#' For each annotated transcript, identifies cross-gene transcripts with
-#' significant sequence similarity by running a minimap2 self-alignment of
-#' the transcriptome FASTA. Returns one row per transcript suitable for
-#' joining into [extract_features()] as an additional context predictor.
+#' For each annotated transcript, identifies whether it has at least
+#' one cross-gene transcript with significant sequence similarity, by
+#' running a minimap2 self-alignment of the transcriptome FASTA.
+#' Returns one row per transcript suitable for joining into
+#' [extract_features()] as a binary context predictor.
 #'
-#' Cross-gene definition: the target transcript must belong to a different
-#' `gene_id` than the query. Each transcript appears once in the output;
-#' transcripts with no qualifying cross-gene hit get `max_pct_id = 0` and
-#' all `has_paralog_*` flags `FALSE`. The aggregation takes the maximum
-#' percent identity across all qualifying cross-gene hits per query.
+#' Cross-gene definition: the target transcript must belong to a
+#' different `gene_id` than the query. A transcript is flagged with
+#' `has_paralog = TRUE` if at least one qualifying cross-gene
+#' alignment survives the `aln_min_len` / `query_cov_min` filters and
+#' the `asm20` preset's effective identity floor (~80%); otherwise
+#' `FALSE`. No continuous identity score is carried through: with the
+#' canonical pipeline, the alignment-stage filters and `asm20` preset
+#' together encode the paralog cutoff, so the relevant signal is just
+#' "qualifying hit, yes or no."
 #'
 #' If `paf_path` already exists and is non-empty, alignment is skipped and
 #' the existing PAF is parsed. If it does not exist (or is empty), minimap2
@@ -22,7 +27,9 @@
 #'   `gene_id` for cross-gene filtering.
 #' @param paf_path Path to a PAF file. If `NULL` (default), a temporary
 #'   file is created and removed at exit. Provide an explicit path to
-#'   cache the alignment for reuse.
+#'   cache the alignment for reuse. A precomputed PAF must contain both
+#'   mapping directions of each pair (i.e. not be generated with
+#'   minimap2's `-X` flag); otherwise per-transcript scores are asymmetric.
 #' @param aln_min_len Minimum alignment length in bp (default 50).
 #' @param query_cov_min Minimum query coverage as a percent (default 70).
 #' @param minimap2_path Path to the minimap2 executable. Default
@@ -35,11 +42,8 @@
 #' @return A data frame with one row per annotated transcript. Columns:
 #' \describe{
 #'   \item{transcript_id, gene_id}{Identifiers from the GTF.}
-#'   \item{max_pct_id}{Highest cross-gene percent identity for this query
-#'     transcript (0 if no qualifying hit).}
-#'   \item{n_cross_hits}{Number of cross-gene hits passing the filters.}
-#'   \item{has_paralog_50, has_paralog_80, has_paralog_90, has_paralog_95}{
-#'     Logical: `max_pct_id` at or above 50/80/90/95 percent.}
+#'   \item{has_paralog}{Logical; `TRUE` if the transcript has at
+#'     least one qualifying cross-gene alignment, `FALSE` otherwise.}
 #' }
 #'
 #' @section minimap2 dependency:
@@ -60,8 +64,7 @@
 #'
 #' @importFrom rtracklayer import
 #' @importFrom data.table fread
-#' @importFrom dplyr filter select distinct left_join group_by summarise
-#'   mutate rename n
+#' @importFrom dplyr filter select distinct left_join mutate
 #' @importFrom rlang .data
 #' @export
 make_paralog_table <- function(fasta,
@@ -138,44 +141,17 @@ make_paralog_table <- function(fasta,
   paf_cg <- paf_cg[is.na(paf_cg$q_gene) | is.na(paf_cg$t_gene) |
                      paf_cg$q_gene != paf_cg$t_gene, ]
 
-  # Per-query summary. Guard against an empty cross-gene table (all hits
-  # within-gene), which would make max() return -Inf with a warning.
-  if (nrow(paf_cg) == 0L) {
-    per_tx <- data.frame(
-      transcript_id = character(0),
-      max_pct_id    = numeric(0),
-      n_cross_hits  = integer(0),
-      stringsAsFactors = FALSE
-    )
-  } else {
-    per_tx <- as.data.frame(paf_cg) |>
-      dplyr::group_by(.data$qname) |>
-      dplyr::summarise(
-        max_pct_id   = max(.data$pct_id, na.rm = TRUE),
-        n_cross_hits = dplyr::n(),
-        .groups      = "drop"
-      ) |>
-      dplyr::rename(transcript_id = "qname")
-  }
+  # Set of query transcripts with at least one qualifying cross-gene
+  # alignment. Every other annotated transcript backfills to FALSE.
+  hit_ids <- unique(paf_cg$qname)
 
-  # Backfill all annotated transcripts.
   out <- data.frame(
     transcript_id    = unique(tx2gene$transcript_id),
     stringsAsFactors = FALSE
   ) |>
-    dplyr::left_join(per_tx, by = "transcript_id") |>
     dplyr::left_join(tx2gene, by = "transcript_id") |>
-    dplyr::mutate(
-      max_pct_id     = ifelse(is.na(.data$max_pct_id),   0,  .data$max_pct_id),
-      n_cross_hits   = ifelse(is.na(.data$n_cross_hits), 0L, .data$n_cross_hits),
-      has_paralog_50 = .data$max_pct_id >= 50,
-      has_paralog_80 = .data$max_pct_id >= 80,
-      has_paralog_90 = .data$max_pct_id >= 90,
-      has_paralog_95 = .data$max_pct_id >= 95
-    ) |>
-    dplyr::select("transcript_id", "gene_id", "max_pct_id", "n_cross_hits",
-                  "has_paralog_50", "has_paralog_80",
-                  "has_paralog_90", "has_paralog_95")
+    dplyr::mutate(has_paralog = .data$transcript_id %in% hit_ids) |>
+    dplyr::select("transcript_id", "gene_id", "has_paralog")
 
   out
 }
@@ -196,9 +172,17 @@ make_paralog_table <- function(fasta,
                                    max_secondary, minimap2_path) {
   dir.create(dirname(paf_out), recursive = TRUE, showWarnings = FALSE)
   log_out <- sub("\\.paf$", ".log", paf_out)
+  # NB: -D (skip self mappings) rather than -X. -X is equivalent to
+  # -D + --dual=no, and --dual=no drops one direction of every pair, so
+  # per-query aggregation in make_paralog_table() would only see one
+  # member of each paralog pair and backfill the other to
+  # has_paralog = FALSE. -D keeps both directions while still
+  # suppressing the trivial diagonal at the source. The qname != tname
+  # filter at the parse step is kept as a safety net for precomputed
+  # PAFs from other sources.
   status <- system2(
     command = minimap2_path,
-    args    = c("-X",                          # skip exact self-hits
+    args    = c("-D",                          # skip self-hits (keep both dirs)
                 "-x", preset,                  # preset (default: asm20)
                 "--secondary=yes",
                 "-N", as.character(max_secondary),

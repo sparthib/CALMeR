@@ -25,7 +25,9 @@ in the self-alignment).}
 
 \item{paf_path}{Path to a PAF file. If \code{NULL} (default), a temporary
 file is created and removed at exit. Provide an explicit path to
-cache the alignment for reuse.}
+cache the alignment for reuse. A precomputed PAF must contain both
+mapping directions of each pair (i.e. not be generated with
+minimap2's \code{-X} flag); otherwise per-transcript scores are asymmetric.}
 
 \item{aln_min_len}{Minimum alignment length in bp (default 50).}
 
@@ -45,25 +47,27 @@ targets pairs with <20\% divergence).}
 A data frame with one row per annotated transcript. Columns:
 \describe{
 \item{transcript_id, gene_id}{Identifiers from the GTF.}
-\item{max_pct_id}{Highest cross-gene percent identity for this query
-transcript (0 if no qualifying hit).}
-\item{n_cross_hits}{Number of cross-gene hits passing the filters.}
-\item{has_paralog_50, has_paralog_80, has_paralog_90, has_paralog_95}{
-Logical: \code{max_pct_id} at or above 50/80/90/95 percent.}
+\item{has_paralog}{Logical; \code{TRUE} if the transcript has at
+least one qualifying cross-gene alignment, \code{FALSE} otherwise.}
 }
 }
 \description{
-For each annotated transcript, identifies cross-gene transcripts with
-significant sequence similarity by running a minimap2 self-alignment of
-the transcriptome FASTA. Returns one row per transcript suitable for
-joining into \code{\link[=extract_features]{extract_features()}} as an additional context predictor.
+For each annotated transcript, identifies whether it has at least
+one cross-gene transcript with significant sequence similarity, by
+running a minimap2 self-alignment of the transcriptome FASTA.
+Returns one row per transcript suitable for joining into
+\code{\link[=extract_features]{extract_features()}} as a binary context predictor.
 }
 \details{
-Cross-gene definition: the target transcript must belong to a different
-\code{gene_id} than the query. Each transcript appears once in the output;
-transcripts with no qualifying cross-gene hit get \code{max_pct_id = 0} and
-all \verb{has_paralog_*} flags \code{FALSE}. The aggregation takes the maximum
-percent identity across all qualifying cross-gene hits per query.
+Cross-gene definition: the target transcript must belong to a
+different \code{gene_id} than the query. A transcript is flagged with
+\code{has_paralog = TRUE} if at least one qualifying cross-gene
+alignment survives the \code{aln_min_len} / \code{query_cov_min} filters and
+the \code{asm20} preset's effective identity floor (~80\%); otherwise
+\code{FALSE}. No continuous identity score is carried through: with the
+canonical pipeline, the alignment-stage filters and \code{asm20} preset
+together encode the paralog cutoff, so the relevant signal is just
+"qualifying hit, yes or no."
 
 If \code{paf_path} already exists and is non-empty, alignment is skipped and
 the existing PAF is parsed. If it does not exist (or is empty), minimap2

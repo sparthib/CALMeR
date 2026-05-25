@@ -17,6 +17,8 @@ params:
   fit: !r NULL
   suite: !r NULL
   scored: !r NULL
+  rank_table: !r NULL
+  picked_name: !r NULL
   sample_name: !r NULL
 ---
 
@@ -26,8 +28,8 @@ knitr::opts_chunk$set(
   warning    = FALSE,
   message    = FALSE,
   fig.align  = "center",
-  fig.crop   = FALSE,  # legacy pdfcrop option
-  crop       = FALSE   # disables knitr's magick-based PNG cropping
+  fig.crop   = FALSE,
+  crop       = FALSE
 )
 
 library(ggplot2)
@@ -35,54 +37,72 @@ library(patchwork)
 library(dplyr)
 library(gamlss)
 
-fit          <- params$fit
-suite        <- params$suite
-scored       <- params$scored
-training     <- fit$training_data
-scale_params <- fit$scale_params
-predictors   <- fit$predictors
-has_scored   <- !is.null(scored)
-has_suite    <- !is.null(suite) && length(suite) > 1
+fit                  <- params$fit
+suite                <- params$suite
+scored               <- params$scored
+rank_table           <- params$rank_table
+picked_name          <- params$picked_name
+training             <- fit$training_data
+scale_params         <- fit$scale_params
+scaled_predictors    <- fit$scaled_predictors
+piecewise_predictors <- fit$piecewise_predictors
+linear_predictors    <- fit$linear_predictors
+predictors           <- fit$predictors
+has_scored           <- !is.null(scored)
+has_suite            <- !is.null(suite) && length(suite) > 1L
 
 invisible(stopifnot(inherits(fit, "calmer_fit")))
+
+# Local null-coalesce + namespace-safe extractor (works under both
+# devtools::load_all() and an installed CALMeR).
+`%||%`             <- function(a, b) if (is.null(a)) b else a
+extract_coef_table <- getNamespace("CALMeR")$.extract_coef_table
 ```
 
 # Predictors
 
-CALMeR conditions MAPQ on the following per-read / per-transcript
-features. Default `clean_features()` filters are listed alongside;
-ranges shown in the partial-effects plots may be tighter (e.g.
-`n_isoforms` is capped at 7 in the partial-effect panel for visual
-clarity).
+CALMeR conditions MAPQ on per-read / per-transcript features, joined into the
+training set by `extract_features()` and pre-processed by `clean_features()`.
+The model enters them in three classes (smoothed with `pb()`, piecewise linear
+with a kink, or plain linear):
 
-| Predictor | What it measures | How it's computed | Default `clean_features()` filter |
+| Predictor | What it measures | How it's computed | Preprocessing |
 |---|---|---|---|
-| `n_isoforms` | Number of annotated isoforms of the **gene** that the read's target transcript belongs to. | `n_distinct(transcript_id)` per `gene_id`, from the GTF. | `<= 10` |
-| `tx_length` | Length of the target transcript in nucleotides. | Sum of exon widths per `transcript_id`, from the GTF. | `[100, 10000]` bp |
-| `gc_content` | GC composition of the target transcript. | `(G + C) / length` from the transcriptome FASTA. | `[30, 70]%` |
-| `pct_covered` | Fraction of the target transcript spanned by the read alignment. | `min(alignment_length / tx_length, 1)`, from the BAM CIGAR + GTF. | none (uses full 0-100% range) |
-| `max_pct_id` *(if present)* | Highest cross-gene transcript-level identity for the target. Captures paralog ambiguity. | `minimap2` self-alignment of the transcriptome FASTA, then `max(pct_id)` over hits with `alen >= 50` and `query_cov >= 70%`, restricted to cross-gene pairs. | none (raw 0-100%; 0 = no paralog) |
-
-The partial-effects plot caps `n_isoforms` at **7** for the x-axis even
-when training data extends higher, since most of the predictive content
-sits in the 1-7 range and very high values become sparse.
+| `n_isoforms` | Number of annotated isoforms of the gene that the read's target transcript belongs to. | `n_distinct(transcript_id)` per `gene_id` (GTF). | Lumped at 7. Enters as a piecewise linear basis with a knot at 5. |
+| `tx_length` | Length of the target transcript in nucleotides. | Sum of exon widths per `transcript_id` (GTF). | Natural-log, then z-score. `pb()` smoother. |
+| `gc_content` | GC composition of the target transcript. | `(G + C) / length` (FASTA). | Z-score. `pb()` smoother. |
+| `pct_covered` | Fraction of the target transcript spanned by the read alignment. | `min(alignment_length / tx_length, 100)` (BAM CIGAR + GTF). | Winsorize 1st/99th, then z-score. `pb()` smoother. |
+| `has_paralog` *(if present)* | Whether the target transcript has at least one qualifying cross-gene paralog. | minimap2 `asm20` self-alignment of the transcriptome; cross-gene hit with `alen ≥ 50` and `query_cov ≥ 70%`. | None (already a 0/1 indicator). Linear 1 df. |
 
 # 1. Training summary
 
-The model was fit on `r nrow(training)` reads sampled from primary
+The picked model was fit on `r nrow(training)` reads sampled from primary
 alignments. Predictors used: `r paste(predictors, collapse = ", ")`.
 
 ```{r training_predictor_ranges}
 ranges <- lapply(predictors, function(p) {
   v <- training[[p]]
-  data.frame(predictor = p,
-             min       = min(v, na.rm = TRUE),
-             median    = median(v, na.rm = TRUE),
-             max       = max(v, na.rm = TRUE),
-             sd        = sd(v, na.rm = TRUE))
+  if (is.logical(v)) {
+    data.frame(
+      predictor = p,
+      min       = min(as.integer(v), na.rm = TRUE),
+      median    = median(as.integer(v), na.rm = TRUE),
+      max       = max(as.integer(v), na.rm = TRUE),
+      sd        = sd(as.integer(v), na.rm = TRUE)
+    )
+  } else {
+    data.frame(
+      predictor = p,
+      min       = min(v, na.rm = TRUE),
+      median    = median(v, na.rm = TRUE),
+      max       = max(v, na.rm = TRUE),
+      sd        = sd(v, na.rm = TRUE)
+    )
+  }
 }) |> dplyr::bind_rows()
 
-knitr::kable(ranges, digits = 2, caption = "Predictor distributions on the training data.")
+knitr::kable(ranges, digits = 2,
+             caption = "Predictor distributions on the training data (post-cleaning).")
 ```
 
 ```{r mapq_dist, fig.height = 3.5, fig.cap = "Observed MAPQ distribution on training data."}
@@ -93,10 +113,98 @@ ggplot(training, aes(x = MAPQ)) +
   theme_minimal()
 ```
 
-# 2. Model fit
+# 2. Model comparison
+
+```{asis, echo = has_suite}
+The suite of BEINF fits is summarised below. Models are ranked separately by
+**AIC**, **BIC**, and **Nagelkerke pseudo-R²** (Cragg-Uhler); the rightmost
+column is the average of those three ranks. The model with the smallest
+average rank is highlighted as **picked**, and drives all subsequent
+sections — residual diagnostics, partial effects, the forest plot, and the
+scoring summary.
+```
+
+```{asis, echo = !has_suite}
+Only a single fit was supplied to `calmer_report()`. The summary below
+reflects that fit's AIC, BIC, and Nagelkerke pseudo-R². To compare against
+alternative parameterisations, fit a `fit_beinf_suite()` and pass the suite
+to `calmer_report()`.
+```
+
+```{r model_comparison_table}
+if (!is.null(rank_table) && nrow(rank_table) > 0L) {
+  show_tbl <- rank_table |>
+    dplyr::mutate(
+      AIC        = round(.data$AIC, 1),
+      BIC        = round(.data$BIC, 1),
+      df         = round(.data$df, 1),
+      Nagelkerke = round(.data$Nagelkerke, 4),
+      rank_AIC        = round(.data$rank_AIC, 1),
+      rank_BIC        = round(.data$rank_BIC, 1),
+      rank_Nagelkerke = round(.data$rank_Nagelkerke, 1),
+      avg_rank        = round(.data$avg_rank, 2),
+      Model           = ifelse(.data$picked,
+                               paste0(.data$Model, " (picked)"),
+                               .data$Model)
+    ) |>
+    dplyr::arrange(.data$avg_rank) |>
+    dplyr::select(-picked)
+  knitr::kable(
+    show_tbl,
+    caption = paste("Model comparison. Lower AIC/BIC and higher Nagelkerke",
+                    "pseudo-R² are better. `avg_rank` averages the three",
+                    "per-metric ranks; the picked model has the smallest",
+                    "average rank.")
+  )
+} else {
+  # Single-fit fallback: just show this one model's metrics.
+  rsq <- tryCatch(
+    round(gamlss::Rsq(fit$fit, type = "Cragg Uhler"), 4),
+    error = function(e) NA_real_
+  )
+  one <- data.frame(
+    Model      = picked_name %||% "(supplied fit)",
+    AIC        = round(stats::AIC(fit$fit), 1),
+    BIC        = round(stats::BIC(fit$fit), 1),
+    df         = round(fit$fit$df.fit, 1),
+    Nagelkerke = rsq,
+    check.names = FALSE
+  )
+  knitr::kable(one, caption = "Fit metrics on the training data.")
+}
+```
+
+```{r model_comparison_qq, eval = has_suite, fig.height = max(3, 3 * ceiling(length(suite) / 2)), fig.cap = "Standard-normal QQ plot of randomized quantile residuals on the training set, one panel per suite fit. The picked model is highlighted in the title."}
+picked_lbl <- picked_name
+qq_df <- dplyr::bind_rows(lapply(names(suite), function(nm) {
+  f      <- suite[[nm]]
+  rqr_in <- tryCatch(
+    suppressWarnings(qnorm(stats::residuals(f$fit, type = "quantile"))),
+    error = function(e) rep(NA_real_, nrow(f$training_data))
+  )
+  data.frame(
+    model = if (!is.null(picked_lbl) && nm == picked_lbl)
+              paste0(nm, " (picked)") else nm,
+    rqr   = rqr_in
+  )
+})) |>
+  dplyr::filter(!is.na(rqr))
+
+if (nrow(qq_df) > 0L) {
+  ggplot(qq_df, aes(sample = rqr)) +
+    stat_qq(size = 0.4, alpha = 0.5, colour = "steelblue") +
+    stat_qq_line(colour = "firebrick", linetype = "dashed") +
+    facet_wrap(~ model, ncol = 2, scales = "free") +
+    labs(x = "Theoretical N(0, 1) quantile",
+         y = "Randomized quantile residual") +
+    theme_minimal(base_size = 10)
+}
+```
+
+# 3. Picked-model fit
 
 ```{r model_summary, results = "asis"}
-cat("**Formulas used:**\n\n")
+cat("**Formulas used (picked model):**\n\n")
 cat("- $\\mu$:    `",    deparse1(fit$formula$mu),    "`\n", sep = "")
 cat("- $\\sigma$: `", deparse1(fit$formula$sigma), "`\n", sep = "")
 cat("- $\\nu$:    `",    deparse1(fit$formula$nu),    "`\n", sep = "")
@@ -130,147 +238,22 @@ edf_df <- dplyr::bind_rows(
 
 if (!is.null(edf_df) && nrow(edf_df) > 0) {
   knitr::kable(edf_df, digits = 2,
-               caption = "Effective degrees of freedom for each smooth term.")
+               caption = "Effective degrees of freedom for each smooth term in the picked model.")
 }
 ```
 
-```{r rsq, results = "asis"}
-rsq <- tryCatch(round(gamlss::Rsq(fit$fit), 4), error = function(e) NA_real_)
-cat("**Pseudo-$R^2$:** ", rsq, "\n", sep = "")
-```
+# 4. Residual diagnostics
 
-# 2b. Model comparison
-
-```{asis, echo = has_suite}
-A suite of BEINF fits is summarised below. The suite includes the four
-canonical defaults — `pb` smoothers on the canonical predictors with
-and without a paralog term, plus the corresponding linear-term
-variants — and optionally a user-supplied fit. AIC, BIC, training EDF
-and gamlss's pseudo-$R^2$ appear in the table; side-by-side QQ panels
-follow. **The primary fit (used downstream by `score_reads()` and the
-sections below) is highlighted.**
-```
-
-```{asis, echo = !has_suite}
-Refits on the same training data with two alternative
-parameterizations: **(i)** linear terms in $\mu$, $\nu$, $\tau$ (this
-is what the user supplied if no spline override was given), and
-**(ii)** penalized B-splines with five interior knots in all three.
-$\sigma$ is held to an intercept-only formula in both. AIC, BIC, and
-gamlss's pseudo-$R^2$ are reported alongside the user-supplied fit.
-For a richer comparison, fit a suite of models with
-`fit_beinf_suite()` and pass it to `calmer_report()`.
-```
-
-```{r model_comparison_fit, results = "hide"}
-extract_metrics <- function(m, label, is_primary = FALSE) {
-  if (is.null(m)) {
-    return(data.frame(Model = label, AIC = NA, BIC = NA,
-                      df = NA, `Pseudo R^2` = NA,
-                      check.names = FALSE))
-  }
-  rsq <- tryCatch(gamlss::Rsq(m), error = function(e) NA_real_)
-  data.frame(
-    Model        = if (is_primary) paste0(label, " (primary)") else label,
-    AIC          = round(AIC(m), 1),
-    BIC          = round(BIC(m), 1),
-    df           = round(m$df.fit, 1),
-    `Pseudo R^2` = round(rsq, 4),
-    check.names  = FALSE
-  )
-}
-
-if (has_suite) {
-  primary_name <- attr(suite, "primary")
-  cmp_tbl <- dplyr::bind_rows(lapply(names(suite), function(nm) {
-    extract_metrics(suite[[nm]]$fit, nm, is_primary = (nm == primary_name))
-  }))
-  qq_fits <- suite
-} else {
-  training    <- fit$training_data
-  all_preds   <- fit$predictors
-  non_paralog <- setdiff(all_preds, "max_pct_id")
-  preds_all_sc <- paste0(all_preds,   "_sc")
-  preds_np_sc  <- paste0(non_paralog, "_sc")
-
-  lin_all_rhs <- paste(preds_all_sc, collapse = " + ")
-  lin_np_rhs  <- paste(preds_np_sc,  collapse = " + ")
-  pb_terms_np <- paste0("pb(", preds_np_sc, ", inter = 5)", collapse = " + ")
-  pb_mix_rhs  <- if ("max_pct_id" %in% all_preds) {
-    paste(pb_terms_np, "+ max_pct_id_sc")
-  } else {
-    pb_terms_np
-  }
-
-  fit_silent <- function(mu_rhs, nu_rhs, tau_rhs) {
-    tryCatch(
-      suppressWarnings(gamlss::gamlss(
-        formula       = stats::as.formula(paste("y ~", mu_rhs)),
-        sigma.formula = ~ 1,
-        nu.formula    = stats::as.formula(paste("~", nu_rhs)),
-        tau.formula   = stats::as.formula(paste("~", tau_rhs)),
-        family        = gamlss.dist::BEINF(),
-        data          = training,
-        control       = gamlss::gamlss.control(trace = FALSE)
-      )),
-      error = function(e) NULL
-    )
-  }
-
-  mod_lin_all <- fit_silent(lin_all_rhs, lin_all_rhs, lin_all_rhs)
-  mod_lin_np  <- fit_silent(lin_np_rhs,  lin_np_rhs,  lin_np_rhs)
-  mod_pb_mix  <- fit_silent(pb_mix_rhs,  pb_mix_rhs,  pb_mix_rhs)
-
-  cmp_tbl <- dplyr::bind_rows(
-    extract_metrics(fit$fit,     "user-supplied (primary)", is_primary = TRUE),
-    extract_metrics(mod_lin_all, "linear (all predictors)"),
-    extract_metrics(mod_lin_np,  "linear (no max_pct_id)"),
-    extract_metrics(mod_pb_mix,  "pb on 4 + linear max_pct_id")
-  )
-  qq_fits <- NULL
-}
-```
-
-```{r model_comparison_table}
-knitr::kable(cmp_tbl,
-             caption = "Model fit metrics on the training data. Lower AIC/BIC and higher pseudo-$R^2$ are better.")
-```
-
-```{r model_comparison_qq, eval = has_suite, fig.height = 3 * ceiling(length(suite) / 2), fig.cap = "Standard-normal QQ plot of randomized quantile residuals on the training set, one panel per suite fit."}
-qq_df <- dplyr::bind_rows(lapply(names(qq_fits), function(nm) {
-  f       <- qq_fits[[nm]]
-  rqr_in  <- tryCatch(
-    suppressWarnings(qnorm(stats::residuals(f$fit, type = "quantile"))),
-    error = function(e) rep(NA_real_, nrow(f$training_data))
-  )
-  data.frame(model = nm, rqr = rqr_in)
-})) |>
-  dplyr::filter(!is.na(rqr))
-
-if (nrow(qq_df) > 0L) {
-  ggplot(qq_df, aes(sample = rqr)) +
-    stat_qq(size = 0.4, alpha = 0.5, colour = "steelblue") +
-    stat_qq_line(colour = "firebrick", linetype = "dashed") +
-    facet_wrap(~ model, ncol = 2, scales = "free") +
-    labs(x = "Theoretical N(0, 1) quantile",
-         y = "Randomized quantile residual") +
-    theme_minimal(base_size = 10)
-}
-```
-
-# 3. Residual diagnostics
-
-Randomized quantile residuals (RQR) should be approximately $N(0, 1)$
-under a correctly specified BEINF model.
+Randomized quantile residuals (RQR) should be approximately $N(0, 1)$ under a
+correctly specified BEINF model.
 
 ```{r residuals_compute}
 qr_train <- stats::residuals(fit$fit)
-qr_df <- data.frame(qr = qr_train, n_isoforms = training$n_isoforms)
 ```
 
-```{r qq_density, fig.height = 4, fig.cap = "Global QQ plot (left) and density vs N(0, 1) (right)."}
+```{r qq_density, fig.height = 4, fig.cap = "Global QQ plot (left) and density vs N(0, 1) (right) for the picked model."}
 qq_pts <- stats::qqnorm(qr_train, plot.it = FALSE)
-qq_df <- data.frame(theoretical = qq_pts$x, sample = qq_pts$y)
+qq_df  <- data.frame(theoretical = qq_pts$x, sample = qq_pts$y)
 
 p_qq <- ggplot(qq_df, aes(x = theoretical, y = sample)) +
   geom_point(alpha = 0.3, size = 0.5) +
@@ -290,19 +273,19 @@ p_qq + p_dens
 ```{r resid_by_predictor, fig.height = 5, fig.cap = "RQR density faceted by predictor bins, with N(0, 1) reference (red dashed)."}
 make_rqr_facet <- function(predictor_name, n_bins = 5) {
   values <- training[[predictor_name]]
-  if (length(unique(values)) <= 10) {
+  # Treat logical and few-valued integer predictors as factors.
+  if (is.logical(values) || length(unique(values)) <= 10L) {
     bin   <- factor(values)
     label <- predictor_name
   } else {
-    qs    <- stats::quantile(values, seq(0, 1, length.out = n_bins + 1),
+    qs    <- stats::quantile(values, seq(0, 1, length.out = n_bins + 1L),
                              na.rm = TRUE)
-    bin   <- cut(values, breaks = unique(qs), include.lowest = TRUE,
-                 dig.lab = 4)
+    bin   <- cut(values, breaks = unique(qs), include.lowest = TRUE, dig.lab = 4)
     label <- paste0(predictor_name, " (quantile bin)")
   }
-  qr_df <- data.frame(qr = qr_train, bin = bin) |>
+  facet_df <- data.frame(qr = qr_train, bin = bin) |>
     dplyr::filter(!is.na(.data$bin))
-  ggplot(qr_df, aes(x = qr)) +
+  ggplot(facet_df, aes(x = qr)) +
     geom_density(fill = "steelblue", alpha = 0.5) +
     stat_function(fun = dnorm, color = "red", linetype = "dashed",
                   linewidth = 0.5) +
@@ -316,28 +299,36 @@ for (p in predictors) {
 }
 ```
 
-# 4. Partial effects on E[MAPQ]
+# 5. Partial effects on E[MAPQ]
 
-Each panel varies one predictor over its training range while holding
-the others at their training median, and shows the model's expected
-MAPQ:
+Each panel varies one predictor over its training range while holding the
+others at their median (or `FALSE` for binary predictors), and shows the
+model's expected MAPQ:
 
 $$
 E[Y] \;=\; \frac{\tau + \mu}{1 + \nu + \tau}, \qquad
 E[\mathrm{MAPQ}] = 60 \cdot E[Y]
 $$
 
-```{r partial_effects_ey, fig.height = 4, fig.cap = "Partial effects on E[MAPQ]."}
+```{r partial_effects_ey, fig.height = 4, fig.cap = "Partial effects on E[MAPQ] for the picked model. Lines for smoothed/piecewise predictors; columns for binary predictors."}
 n_grid <- 200
+
 make_base_nd <- function(n) {
-  base <- as.data.frame(lapply(predictors, function(p) {
-    rep(stats::median(training[[paste0(p, "_sc")]], na.rm = TRUE), n)
-  }))
-  names(base) <- paste0(predictors, "_sc")
-  for (p in predictors) {
+  base <- data.frame(y = rep(stats::median(training$y, na.rm = TRUE), n))
+  for (p in scaled_predictors) {
+    base[[paste0(p, "_sc")]] <- rep(
+      stats::median(training[[paste0(p, "_sc")]], na.rm = TRUE), n
+    )
     base[[p]] <- rep(stats::median(training[[p]], na.rm = TRUE), n)
   }
-  base$y <- rep(stats::median(training$y, na.rm = TRUE), n)
+  for (p in names(piecewise_predictors)) {
+    base[[p]] <- rep(stats::median(training[[p]], na.rm = TRUE), n)
+  }
+  for (p in linear_predictors) {
+    v <- training[[p]]
+    base[[p]] <- if (is.logical(v)) rep(FALSE, n)
+                 else rep(stats::median(v, na.rm = TRUE), n)
+  }
   base
 }
 
@@ -351,28 +342,101 @@ predict_ey <- function(nd) {
   (tau_p + mu_p) / (1 + nu_p + tau_p) * 60
 }
 
-ey_panels <- lapply(predictors, function(p) {
+# Smoothed predictors: line plot over training range.
+panel_scaled <- function(p) {
   nd     <- make_base_nd(n_grid)
   x_lo   <- min(training[[p]], na.rm = TRUE)
   x_hi   <- max(training[[p]], na.rm = TRUE)
-  if (p == "n_isoforms") x_hi <- min(x_hi, 7)   # cap n_isoforms at 7
   raw_seq <- seq(x_lo, x_hi, length.out = n_grid)
-  nd[[paste0(p, "_sc")]] <- (raw_seq - scale_params[[p]]$center) /
-                            scale_params[[p]]$scale
+  nd[[paste0(p, "_sc")]] <-
+    (raw_seq - scale_params[[p]]$center) / scale_params[[p]]$scale
   nd[[p]] <- raw_seq
   df <- data.frame(x = raw_seq, y = predict_ey(nd))
-  log_x <- p == "tx_length"
-  p_obj <- ggplot(df, aes(x, y)) +
+  ggplot(df, aes(x, y)) +
     geom_line(color = "steelblue", linewidth = 0.9) +
     coord_cartesian(ylim = c(0, 60)) +
     scale_y_continuous(breaks = c(0, 10, 20, 30, 40, 50, 60)) +
     labs(x = p, y = "E[MAPQ]", title = p) +
     theme_minimal(base_size = 9)
-  if (log_x) p_obj <- p_obj + scale_x_log10()
-  p_obj
-})
+}
 
-patchwork::wrap_plots(ey_panels, nrow = 1)
+# Piecewise predictors: discrete line, one point per integer.
+panel_piecewise <- function(p) {
+  x_lo  <- min(training[[p]], na.rm = TRUE)
+  x_hi  <- max(training[[p]], na.rm = TRUE)
+  x_seq <- seq(floor(x_lo), ceiling(x_hi), by = 1)
+  if (length(x_seq) > 12L) x_seq <- seq(x_lo, x_hi, length.out = 12)
+  nd <- make_base_nd(length(x_seq))
+  nd[[p]] <- x_seq
+  df <- data.frame(x = x_seq, y = predict_ey(nd))
+  ggplot(df, aes(x, y)) +
+    geom_line(color = "steelblue", linewidth = 0.9) +
+    geom_point(color = "steelblue", size = 1.6) +
+    coord_cartesian(ylim = c(0, 60)) +
+    scale_y_continuous(breaks = c(0, 10, 20, 30, 40, 50, 60)) +
+    labs(x = p, y = "E[MAPQ]", title = p) +
+    theme_minimal(base_size = 9)
+}
+
+# Linear (binary or otherwise) predictors: column for each level.
+panel_linear <- function(p) {
+  vals <- sort(unique(training[[p]]))
+  nd   <- make_base_nd(length(vals))
+  nd[[p]] <- vals
+  df <- data.frame(
+    x = if (is.logical(vals)) factor(vals, levels = c(FALSE, TRUE))
+        else factor(vals),
+    y = predict_ey(nd)
+  )
+  ggplot(df, aes(x = x, y = y)) +
+    geom_col(fill = "steelblue", alpha = 0.85, width = 0.6) +
+    coord_cartesian(ylim = c(0, 60)) +
+    scale_y_continuous(breaks = c(0, 10, 20, 30, 40, 50, 60)) +
+    labs(x = p, y = "E[MAPQ]", title = p) +
+    theme_minimal(base_size = 9)
+}
+
+panels <- c(
+  lapply(scaled_predictors,              panel_scaled),
+  lapply(names(piecewise_predictors),    panel_piecewise),
+  lapply(linear_predictors,              panel_linear)
+)
+patchwork::wrap_plots(panels, nrow = 1)
+```
+
+# 6. Coefficient forest plot
+
+Wald 95% confidence intervals for the non-spline coefficients of the picked
+model, one panel per BEINF distributional parameter (`mu` controls the mean
+of the continuous part, `sigma` its dispersion, `nu` the zero-mass weight,
+`tau` the one-mass weight). `pb()` smoother terms are excluded; their
+contributions are summarised by the partial-effects plot above and the EDF
+table.
+
+```{r forest_plot, fig.height = 5, fig.cap = "Coefficient forest plot for the picked model. Vertical dashed line at 0; horizontal bars are 95% Wald CIs. Spline (pb) terms are not shown."}
+coef_tbl <- tryCatch(extract_coef_table(fit$fit),
+                     error = function(e) data.frame())
+if (nrow(coef_tbl) > 0L && "is_pb" %in% names(coef_tbl)) {
+  coef_tbl <- coef_tbl[!coef_tbl$is_pb, , drop = FALSE]
+}
+
+if (nrow(coef_tbl) > 0L) {
+  coef_tbl$parameter <- factor(coef_tbl$parameter,
+                               levels = c("mu", "sigma", "nu", "tau"))
+  coef_tbl$term      <- factor(coef_tbl$term,
+                               levels = rev(unique(coef_tbl$term)))
+  ggplot(coef_tbl, aes(x = estimate, y = term)) +
+    geom_vline(xintercept = 0, color = "grey60", linetype = "dashed") +
+    geom_errorbarh(aes(xmin = lower, xmax = upper),
+                   height = 0.2, color = "steelblue") +
+    geom_point(color = "steelblue", size = 2) +
+    facet_wrap(~ parameter, scales = "free_x", ncol = 2) +
+    labs(x = "Coefficient (95% Wald CI)", y = NULL) +
+    theme_minimal(base_size = 10) +
+    theme(panel.grid.major.y = element_blank())
+} else {
+  cat("_Coefficient table not available for this fit (summary extraction failed)._\n")
+}
 ```
 
 ```{r scoring_setup, eval = has_scored, include = FALSE}
@@ -394,7 +458,7 @@ n_flag_p0     <- sum(flag_src == "p0_dev_high", na.rm = TRUE)
 ```
 
 ```{r scoring_header, eval = has_scored, results = "asis"}
-cat("# 5. Scoring summary\n\n")
+cat("# 7. Scoring summary\n\n")
 cat("Flagging is asymmetric across the MAPQ range:\n\n")
 cat("- **MAPQ in (0, 60)**: RQR low-tail rule.\n")
 cat("- **MAPQ = 0**: binomial deviance rule on the predicted zero-mass probability.\n")
@@ -426,7 +490,7 @@ ggplot(scored[!is.na(scored$rqr), ], aes(x = rqr)) +
 ```
 
 ```{r flags_header, eval = has_scored, results = "asis"}
-cat("# 6. Where flags landed\n\n")
+cat("# 8. Where flags landed\n\n")
 ```
 
 ```{r flags_by_niso_table, eval = has_scored}
@@ -442,232 +506,121 @@ flag_by_niso <- scored |>
                           sum(.data$flag_source == "rqr_low") else NA_integer_,
     n_flag_p0         = if (has_src)
                           sum(.data$flag_source == "p0_dev_high") else NA_integer_,
-    median_tx_length  = round(stats::median(.data$tx_length, na.rm = TRUE)),
+    median_tx_length  = round(stats::median(.data$tx_length, na.rm = TRUE), 2),
     median_gc_content = round(stats::median(.data$gc_content, na.rm = TRUE), 1),
-    pct_paralog_gt50  = if ("max_pct_id" %in% names(scored))
-                          round(100 * mean(.data$max_pct_id > 50, na.rm = TRUE), 1)
+    pct_has_paralog   = if ("has_paralog" %in% names(scored))
+                          round(100 * mean(.data$has_paralog, na.rm = TRUE), 1)
                         else NA_real_,
     .groups = "drop"
   ) |>
   dplyr::arrange(.data$n_isoforms)
 
 knitr::kable(flag_by_niso,
-  caption = paste("Per n_isoforms: scored count, total flagged, % flagged,",
+  caption = paste("Per `n_isoforms`: scored count, total flagged, % flagged,",
                   "flags from each rule (n_flag_rqr = RQR low-tail on",
                   "MAPQ in 1..59; n_flag_p0 = deviance rule on MAPQ = 0),",
-                  "and group-level context (median tx_length, median",
-                  "gc_content, % of reads on transcripts with a paralog",
-                  "at >50% identity)."))
+                  "and group-level context (median `tx_length` on log scale,",
+                  "median `gc_content`, % of reads on transcripts with a",
+                  "qualifying paralog)."))
 ```
 
-```{r flags_heatmap, eval = has_scored, fig.height = 5, fig.cap = "Flag rate (% of scored reads flagged) by n_isoforms x pct_covered bin. Cell labels show the absolute number of flagged reads in the bin."}
-pct_breaks <- seq(0, 100, by = 10)
-pct_labels <- paste0(pct_breaks[-length(pct_breaks)], "-", pct_breaks[-1], "%")
-
-hm <- scored |>
-  dplyr::filter(!is.na(.data$rqr)) |>
-  dplyr::mutate(
-    pct_cov_bin = cut(.data$pct_covered, breaks = pct_breaks,
-                      include.lowest = TRUE, labels = pct_labels)
-  ) |>
-  dplyr::filter(!is.na(.data$pct_cov_bin)) |>
-  dplyr::group_by(.data$n_isoforms, .data$pct_cov_bin) |>
-  dplyr::summarise(n_scored   = dplyr::n(),
-                   n_flagged  = sum(.data$flag_low %in% TRUE),
-                   .groups    = "drop") |>
-  dplyr::mutate(pct_flagged = 100 * n_flagged / pmax(n_scored, 1))
-
-ggplot(hm, aes(x = factor(n_isoforms), y = pct_cov_bin, fill = pct_flagged)) +
-  geom_tile(color = "white", linewidth = 0.3) +
-  geom_text(aes(label = ifelse(n_flagged >= 1,
-                               format(n_flagged, big.mark = ","), "")),
-            size = 2.4, color = "grey20") +
-  scale_fill_gradient(low = "grey90", high = "#D85A30",
-                      name = "% flagged",
-                      labels = function(v) sprintf("%.2f%%", v)) +
-  labs(x = "n_isoforms", y = "pct_covered bin",
-       subtitle = "Fill = flag rate per cell; labels = absolute flagged-read count.") +
-  theme_minimal(base_size = 10)
-```
-
-```{r mapq_by_flag, eval = has_scored, fig.height = 3.5, fig.cap = "Scored MAPQ distribution. Rug ticks mark flagged reads, coloured by flag source: orange = RQR low-tail (MAPQ in 1..59), purple = MAPQ = 0 deviance (model predicted zero-mass to be unlikely)."}
-scored_ok <- scored |> dplyr::filter(!is.na(.data$rqr))
-flagged   <- scored_ok |> dplyr::filter(.data$flag_low %in% TRUE)
-
-# Backwards-compat: older scored frames may not carry flag_source.
-if (!"flag_source" %in% names(flagged)) {
-  flagged$flag_source <- "rqr_low"
-}
-flagged$flag_source <- factor(flagged$flag_source,
-                              levels = c("rqr_low", "p0_dev_high"))
-
-ggplot(scored_ok, aes(x = MAPQ)) +
-  geom_histogram(binwidth = 1, fill = "steelblue",
-                 color = "white", alpha = 0.85) +
-  geom_rug(data = flagged, aes(x = MAPQ, colour = flag_source),
-           inherit.aes = FALSE,
-           linewidth = 0.8, length = unit(0.04, "npc"),
-           alpha = 0.7) +
-  scale_x_continuous(breaks = c(0, 10, 20, 30, 40, 50, 60)) +
-  scale_colour_manual(
-    values = c(rqr_low     = "#D85A30",
-               p0_dev_high = "#7B3294"),
-    labels = c(rqr_low     = "RQR low-tail (1..59)",
-               p0_dev_high = "MAPQ = 0 deviance"),
-    name   = "Flag source",
-    drop   = FALSE
-  ) +
-  labs(x = "MAPQ", y = "Count") +
-  theme_minimal() +
-  theme(legend.position = "bottom")
-```
-
-```{r flag_strat_header, eval = has_scored, results = "asis"}
-cat("# 7. Predictor-stratified flag analysis\n\n")
-cat("The plots below break the flag rate down by transcript-level ",
-    "predictor bins, separating contributions from the two flag rules. ",
-    "Bars show the per-bin **percent of scored reads flagged** (stacked ",
-    "by flag source); numbers above each bar are the **total scored ",
-    "reads** in that bin. Use the bin counts to discount apparent peaks ",
-    "in low-population bins.\n\n", sep = "")
-```
-
-```{r flag_strat_setup, eval = has_scored, include = FALSE}
-has_paralog <- "max_pct_id" %in% names(scored)
-
+```{r flags_dist_setup, eval = has_scored, include = FALSE}
+# Distribution of flagged reads across predictor bins.
+# Per panel, bars are stacked by flag source and the total height
+# across all bins (for a given source) sums to 100% of that source's
+# flagged reads.
 scored_pred <- scored |> dplyr::filter(!is.na(.data$rqr))
+flagged_only <- scored_pred |> dplyr::filter(.data$flag_low %in% TRUE)
 
-make_bins <- function(x, breaks, labels) {
-  cut(x, breaks = breaks, include.lowest = TRUE,
-      labels = labels, right = FALSE)
+n_flag_rqr_total <- sum(flagged_only$flag_source == "rqr_low",     na.rm = TRUE)
+n_flag_p0_total  <- sum(flagged_only$flag_source == "p0_dev_high", na.rm = TRUE)
+
+# Bin builders.
+gc_breaks <- seq(20, 80, by = 5)
+gc_labels <- paste0(gc_breaks[-length(gc_breaks)], "-",
+                    gc_breaks[-1])
+scored_pred$gc_bin <- cut(scored_pred$gc_content,
+                          breaks = gc_breaks,
+                          labels = gc_labels,
+                          include.lowest = TRUE, right = FALSE)
+
+# tx_length is log-scaled post-clean_features; bin in log space and label
+# in raw (exp) values for legibility.
+tx_breaks <- c(-Inf, log(250), log(500), log(1000),
+               log(2000), log(5000), Inf)
+tx_labels <- c("<250", "250-500", "500-1k", "1k-2k", "2k-5k", ">=5k")
+scored_pred$tx_bin <- cut(scored_pred$tx_length,
+                          breaks = tx_breaks,
+                          labels = tx_labels,
+                          include.lowest = TRUE, right = FALSE)
+
+pcov_breaks <- seq(0, 100, by = 10)
+pcov_labels <- paste0(pcov_breaks[-length(pcov_breaks)], "-",
+                      pcov_breaks[-1], "%")
+scored_pred$pcov_bin <- cut(scored_pred$pct_covered,
+                            breaks = pcov_breaks,
+                            labels = pcov_labels,
+                            include.lowest = TRUE, right = FALSE)
+
+scored_pred$niso_bin <- factor(scored_pred$n_isoforms)
+
+has_paralog_col <- "has_paralog" %in% names(scored_pred)
+if (has_paralog_col) {
+  scored_pred$para_bin <- factor(scored_pred$has_paralog,
+                                 levels = c(FALSE, TRUE),
+                                 labels = c("no paralog", "paralog"))
 }
 
-gc_breaks <- c(30, 35, 40, 45, 50, 55, 60, 65, 70)
-gc_labels <- c("30-35", "35-40", "40-45", "45-50",
-               "50-55", "55-60", "60-65", "65-70")
-scored_pred$gc_bin <- make_bins(scored_pred$gc_content, gc_breaks, gc_labels)
-
-tx_breaks <- c(0, 250, 500, 1000, 2000, Inf)
-tx_labels <- c("<250", "250-500", "500-1k", "1k-2k", ">=2k")
-scored_pred$tx_bin <- make_bins(scored_pred$tx_length, tx_breaks, tx_labels)
-
-if (has_paralog) {
-  # max_pct_id == 0 exactly for non-paralogs, so split on (0, 50), etc.
-  pp_breaks <- c(-Inf, 0.5, 50, 80, 90, 100.5)
-  pp_labels <- c("None (0)", "(0,50)", "[50,80)", "[80,90)", ">=90")
-  scored_pred$pp_bin <- make_bins(scored_pred$max_pct_id,
-                                  pp_breaks, pp_labels)
-}
-
-summarise_bin <- function(df, bin_col) {
+summarise_dist <- function(df, bin_col) {
   df |>
+    dplyr::filter(.data$flag_low %in% TRUE) |>
     dplyr::filter(!is.na(.data[[bin_col]])) |>
-    dplyr::group_by(bin = .data[[bin_col]]) |>
-    dplyr::summarise(
-      n_scored   = dplyr::n(),
-      n_flag_rqr = sum(.data$flag_source == "rqr_low",     na.rm = TRUE),
-      n_flag_p0  = sum(.data$flag_source == "p0_dev_high", na.rm = TRUE),
-      .groups    = "drop"
-    ) |>
+    dplyr::count(bin = .data[[bin_col]], src = .data$flag_source) |>
     dplyr::mutate(
-      pct_rqr = 100 * .data$n_flag_rqr / pmax(.data$n_scored, 1),
-      pct_p0  = 100 * .data$n_flag_p0  / pmax(.data$n_scored, 1)
+      pct = dplyr::case_when(
+        src == "rqr_low"     ~ 100 * .data$n / max(n_flag_rqr_total, 1),
+        src == "p0_dev_high" ~ 100 * .data$n / max(n_flag_p0_total,  1),
+        TRUE                  ~ NA_real_
+      )
     )
 }
 
-plot_bin_rates <- function(tab, xlab) {
-  long <- dplyr::bind_rows(
-    tab |> dplyr::transmute(.data$bin, .data$n_scored,
-                            src = "MAPQ = 0 deviance",
-                            pct = .data$pct_p0),
-    tab |> dplyr::transmute(.data$bin, .data$n_scored,
-                            src = "RQR low-tail (1..59)",
-                            pct = .data$pct_rqr)
-  )
-  long$src <- factor(long$src,
-                     levels = c("MAPQ = 0 deviance",
-                                "RQR low-tail (1..59)"))
-  totals <- tab |>
-    dplyr::mutate(pct_total = .data$pct_rqr + .data$pct_p0)
-  ggplot(long, aes(x = .data$bin, y = .data$pct, fill = .data$src)) +
+plot_dist <- function(tab, xlab) {
+  if (nrow(tab) == 0L) {
+    return(ggplot() + theme_void() +
+           labs(title = xlab, subtitle = "no flagged reads in any bin"))
+  }
+  tab$src <- factor(tab$src,
+                    levels = c("p0_dev_high", "rqr_low"),
+                    labels = c("MAPQ = 0 deviance", "RQR low-tail (1..59)"))
+  ggplot(tab, aes(x = .data$bin, y = .data$pct, fill = .data$src)) +
     geom_col(width = 0.75) +
-    geom_text(data = totals,
-              aes(x = .data$bin, y = .data$pct_total,
-                  label = format(.data$n_scored, big.mark = ",")),
-              inherit.aes = FALSE,
-              vjust = -0.4, size = 2.4, color = "grey30") +
-    scale_fill_manual(values = c("MAPQ = 0 deviance"   = "#7B3294",
-                                 "RQR low-tail (1..59)" = "#D85A30"),
+    scale_fill_manual(values = c("MAPQ = 0 deviance"     = "#7B3294",
+                                 "RQR low-tail (1..59)"  = "#D85A30"),
                       name = NULL) +
-    scale_y_continuous(expand = expansion(mult = c(0, 0.18)),
-                       labels = function(v) sprintf("%.2f%%", v)) +
-    labs(x = xlab, y = "% flagged") +
+    scale_y_continuous(expand = expansion(mult = c(0, 0.1)),
+                       labels = function(v) sprintf("%.1f%%", v)) +
+    labs(x = xlab, y = "% of flagged reads (per source)") +
     theme_minimal(base_size = 10) +
     theme(legend.position = "bottom",
           axis.text.x = element_text(angle = 35, hjust = 1))
 }
 ```
 
-```{r flags_by_predictor, eval = has_scored, fig.width = 11, fig.height = 4.2, fig.cap = "Flag rate per bin of each transcript-level predictor, stratified by flag source. Bars are stacked (purple = MAPQ = 0 deviance, orange = RQR low-tail in MAPQ in 1..59); numbers above each bar are total reads scored in that bin. The gc_content panel uses 5% bins across the clean_features() clamp range; tx_length uses log-spaced bins; max_pct_id separates non-paralog transcripts (= 0) from the four paralog identity bands."}
-p_gc <- plot_bin_rates(summarise_bin(scored_pred, "gc_bin"),
-                       "gc_content (%)")
-p_tx <- plot_bin_rates(summarise_bin(scored_pred, "tx_bin"),
-                       "tx_length (bp)")
-
-panels <- if (has_paralog) {
-  p_pp <- plot_bin_rates(summarise_bin(scored_pred, "pp_bin"),
-                         "max_pct_id (%)")
-  p_gc + p_tx + p_pp
-} else {
-  p_gc + p_tx
+```{r flags_by_predictor, eval = has_scored, fig.width = 12, fig.height = 8, fig.cap = "Distribution of flagged reads across bins of each predictor, stacked by flag source. For each source, bar heights across all bins of a given panel sum to 100% of that source's flagged reads."}
+panels <- list(
+  plot_dist(summarise_dist(scored_pred, "niso_bin"), "n_isoforms"),
+  plot_dist(summarise_dist(scored_pred, "tx_bin"),   "tx_length (bp)"),
+  plot_dist(summarise_dist(scored_pred, "gc_bin"),   "gc_content (%)"),
+  plot_dist(summarise_dist(scored_pred, "pcov_bin"), "pct_covered")
+)
+if (has_paralog_col) {
+  panels <- c(panels,
+              list(plot_dist(summarise_dist(scored_pred, "para_bin"),
+                             "has_paralog")))
 }
-
-panels +
+patchwork::wrap_plots(panels, ncol = 2) +
   patchwork::plot_layout(guides = "collect") &
   theme(legend.position = "bottom")
 ```
 
-```{r paralog_ecdf, eval = has_scored && has_paralog, fig.height = 3.8, fig.cap = "Empirical CDF of max_pct_id across scored reads, split by flag status. If flagged reads are paralog-enriched, the orange (flagged) curve sits to the right of the grey (unflagged) curve at intermediate-to-high identity values."}
-ecdf_df <- scored_pred |>
-  dplyr::mutate(flagged = ifelse(.data$flag_low %in% TRUE,
-                                 "Flagged", "Unflagged"))
-ggplot(ecdf_df, aes(x = .data$max_pct_id, colour = .data$flagged)) +
-  stat_ecdf(geom = "step", linewidth = 0.7) +
-  scale_colour_manual(values = c(Flagged   = "#D85A30",
-                                 Unflagged = "grey40"),
-                      name = NULL) +
-  scale_x_continuous(breaks = c(0, 25, 50, 75, 90, 100)) +
-  labs(x = "max_pct_id (cross-gene paralog identity, %)",
-       y = "ECDF") +
-  theme_minimal(base_size = 10) +
-  theme(legend.position = "bottom")
-```
-
-```{r paralog_within_mapq0, eval = has_scored && has_paralog}
-enrich <- scored_pred |>
-  dplyr::filter(.data$MAPQ == 0) |>
-  dplyr::mutate(flagged = ifelse(.data$flag_low %in% TRUE,
-                                 "Flagged (p0 dev > threshold)",
-                                 "Unflagged")) |>
-  dplyr::group_by(.data$flagged) |>
-  dplyr::summarise(
-    n_reads          = dplyr::n(),
-    n_paralog_ge50   = sum(.data$max_pct_id >= 50, na.rm = TRUE),
-    pct_paralog_ge50 = round(100 * mean(.data$max_pct_id >= 50,
-                                        na.rm = TRUE), 2),
-    n_paralog_ge90   = sum(.data$max_pct_id >= 90, na.rm = TRUE),
-    pct_paralog_ge90 = round(100 * mean(.data$max_pct_id >= 90,
-                                        na.rm = TRUE), 2),
-    .groups          = "drop"
-  )
-
-knitr::kable(enrich,
-  caption = paste("Paralog enrichment within MAPQ = 0 reads.",
-                  "Compares the deviance-flagged subset against the",
-                  "unflagged MAPQ = 0 background on the fraction of",
-                  "reads whose target transcript has a cross-gene",
-                  "paralog at >=50% / >=90% identity. A higher rate",
-                  "in the flagged row indicates that the deviance",
-                  "rule is preferentially flagging paralog-ambiguous",
-                  "reads."))
-```

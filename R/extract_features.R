@@ -28,14 +28,14 @@
 #'   chromosomes such as `"SIRVomeERCCome"` or `"chrIS"`).
 #' @param include_secondary Logical; if `FALSE` (default), secondary
 #'   alignments are excluded.
-#' @param paralog_table Optional. Either a data frame produced by
-#'   [make_paralog_table()] or a path to a TSV with the same columns. If
-#'   supplied, its non-key columns (everything except `transcript_id` and
-#'   `gene_id`) are joined into the per-read table by `transcript_id`,
-#'   with the same version-strip fallback used for the GTF/FASTA join.
-#'   Numeric columns missing for a transcript are filled with 0; logical
-#'   columns are filled with `FALSE`. Useful for adding `max_pct_id` or
-#'   `has_paralog_*` as additional context predictors for [fit_beinf()].
+#' @param paralog_table Optional paralog table (or path to a TSV with
+#'   the same columns) produced by [make_paralog_table()]. Must have
+#'   `transcript_id` and `has_paralog` (logical / 0-1). The
+#'   `has_paralog` column is joined onto the per-read table by
+#'   `transcript_id` (with a version-strip fallback for
+#'   annotation-version mismatches); reads on transcripts not in the
+#'   table inherit `has_paralog = FALSE`. This is the binary predictor
+#'   consumed by [fit_beinf()].
 #'
 #' @return A data.frame with one row per alignment containing
 #'   `read_id`, `transcript_id`, `MAPQ`, `alignment_length`, `aln_type`,
@@ -205,9 +205,9 @@ extract_features <- function(bam,
   out
 }
 
-# Internal: join a paralog table onto reads_df by transcript_id, with the
-# same version-strip fallback used elsewhere. Numeric NAs -> 0;
-# logical NAs -> FALSE.
+# Internal: join the binary has_paralog column from a (binarized)
+# paralog table onto reads_df by transcript_id, with the same
+# version-strip fallback used elsewhere. Unmatched reads get FALSE.
 .join_paralog_table <- function(reads_df, paralog_table) {
   if (is.character(paralog_table) && length(paralog_table) == 1L) {
     if (!file.exists(paralog_table)) {
@@ -222,19 +222,22 @@ extract_features <- function(bam,
     stop("paralog_table must be a data frame with a 'transcript_id' column ",
          "(or a path to a TSV with the same).", call. = FALSE)
   }
-
-  paralog_cols <- setdiff(names(paralog_table), c("transcript_id", "gene_id"))
-  if (length(paralog_cols) == 0L) {
-    return(reads_df)
+  if (!"has_paralog" %in% names(paralog_table)) {
+    stop("paralog_table must have a 'has_paralog' column ",
+         "(produced by make_paralog_table()).",
+         call. = FALSE)
   }
 
-  reads_df <- dplyr::left_join(
-    reads_df,
-    paralog_table[, c("transcript_id", paralog_cols), drop = FALSE],
-    by = "transcript_id"
-  )
+  # Reduce to the two columns we actually need before joining; any other
+  # columns on the input are diagnostic-only and do not ride along onto
+  # the per-read table.
+  paralog_table <- paralog_table[, c("transcript_id", "has_paralog"),
+                                 drop = FALSE]
 
-  unmatched <- is.na(reads_df[[paralog_cols[1]]])
+  reads_df <- dplyr::left_join(reads_df, paralog_table,
+                               by = "transcript_id")
+
+  unmatched <- is.na(reads_df$has_paralog)
   if (any(unmatched)) {
     paralog_nv <- paralog_table |>
       dplyr::mutate(
@@ -244,18 +247,10 @@ extract_features <- function(bam,
     reads_df$transcript_id_nv <- sub("\\.\\d+$", "", reads_df$transcript_id)
     fb <- paralog_nv[match(reads_df$transcript_id_nv[unmatched],
                            paralog_nv$transcript_id_nv), , drop = FALSE]
-    for (col in paralog_cols) {
-      reads_df[[col]][unmatched] <- fb[[col]]
-    }
+    reads_df$has_paralog[unmatched] <- fb$has_paralog
     reads_df$transcript_id_nv <- NULL
   }
 
-  for (col in paralog_cols) {
-    if (is.numeric(reads_df[[col]])) {
-      reads_df[[col]][is.na(reads_df[[col]])] <- 0
-    } else if (is.logical(reads_df[[col]])) {
-      reads_df[[col]][is.na(reads_df[[col]])] <- FALSE
-    }
-  }
+  reads_df$has_paralog[is.na(reads_df$has_paralog)] <- FALSE
   reads_df
 }

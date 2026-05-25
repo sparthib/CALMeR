@@ -15,8 +15,10 @@ score_reads(
 )
 }
 \arguments{
-\item{features}{Data frame from \code{\link[=extract_features]{extract_features()}} (typically the
-full set, not just the training subset).}
+\item{features}{Data frame from \code{\link[=clean_features]{clean_features()}} (or
+\code{\link[=extract_features]{extract_features()}} if no cleaning is needed). Must contain all
+predictors used by the fit, transformed the same way as the
+training data.}
 
 \item{fit}{Either a single \code{calmer_fit} returned by \code{\link[=fit_beinf]{fit_beinf()}},
 or a \code{calmer_suite} returned by \code{\link[=fit_beinf_suite]{fit_beinf_suite()}}. If a suite is
@@ -40,12 +42,7 @@ is ~ 0.011.}
 \item{seed}{Random seed for the uniform draws on point masses.}
 
 \item{primary_only}{Logical; if \code{TRUE} (default) score only primary
-alignments. Secondary alignments inherit \code{flag_low = FALSE}.
-
-Reads with at least one predictor outside the training-data range
-are marked as \code{out_of_range = TRUE} and not scored, since the
-model's cubic-spline extrapolation is unreliable beyond the
-data it saw during fitting.}
+alignments. Secondary alignments inherit \code{flag_low = FALSE}.}
 }
 \value{
 A data frame with the input columns plus \code{mu_p}, \code{sigma_p},
@@ -61,6 +58,26 @@ randomized quantile residual (RQR) and flags reads with anomalously
 low residuals.
 }
 \details{
+Preprocessing must be consistent between training and scoring data.
+The expected pattern is: clean the training data with
+\code{\link[=clean_features]{clean_features()}}, fit with \code{\link[=fit_beinf]{fit_beinf()}} or \code{\link[=fit_beinf_suite]{fit_beinf_suite()}},
+then clean the scoring data with the \strong{same} transforms — including
+the training winsorize bounds stored on the fit
+(\code{fit$winsor_bounds}):
+\preformatted{
+  clean_train <- clean_features(features)
+  fit         <- fit_beinf(clean_train)
+  clean_test  <- clean_features(
+    features,
+    pct_covered_winsor_bounds = fit$winsor_bounds
+  )
+  scored      <- score_reads(clean_test, fit)
+}
+Inside \code{score_reads}, only the z-score step is re-applied (using
+\code{fit$scale_params} on \code{scaled_predictors}); the log / winsorize /
+lump-at-7 transforms are expected to already be in place on the
+input.
+
 For continuous response values (MAPQ in 1..59), the RQR is the
 standard normal quantile of the model CDF at that value. For point
 masses (MAPQ = 0 or MAPQ = 60), the residual is randomized over the
@@ -90,17 +107,23 @@ low" given any context.
 
 Reads with \code{NA} in any required predictor are kept in the output but
 assigned \code{rqr = NA} and \code{flag_low = FALSE} (i.e. retained by default).
+Reads with at least one predictor outside the training-data range
+are marked \code{out_of_range = TRUE} and not scored, since the model's
+cubic-spline extrapolation is unreliable beyond the training domain.
 }
 \examples{
 ex       <- calmer_example_data()
-features <- extract_features(ex$bam, ex$gtf, ex$fasta)
+paralog  <- make_paralog_table(ex$fasta, ex$gtf, paf_path = ex$paf)
+features <- extract_features(ex$bam, ex$gtf, ex$fasta,
+                             paralog_table = paralog)
 clean    <- clean_features(features)
 fit <- fit_beinf(
   clean, n = 1000,
-  formula       = y ~ n_isoforms_sc + tx_length_sc + gc_content_sc + pct_covered_sc,
+  formula       = y ~ tx_length_sc + gc_content_sc + pct_covered_sc +
+                      n_isoforms + I(pmax(n_isoforms - 5, 0)) + has_paralog,
   sigma_formula = ~ 1, nu_formula = ~ 1, tau_formula = ~ 1
 )
-scored <- score_reads(features, fit,
+scored <- score_reads(clean, fit,
                       filter_method = "mad", threshold = -3)
 table(scored$flag_low)
 

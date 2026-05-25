@@ -32,14 +32,14 @@ chromosomes such as \code{"SIRVomeERCCome"} or \code{"chrIS"}).}
 \item{include_secondary}{Logical; if \code{FALSE} (default), secondary
 alignments are excluded.}
 
-\item{paralog_table}{Optional. Either a data frame produced by
-\code{\link[=make_paralog_table]{make_paralog_table()}} or a path to a TSV with the same columns. If
-supplied, its non-key columns (everything except \code{transcript_id} and
-\code{gene_id}) are joined into the per-read table by \code{transcript_id},
-with the same version-strip fallback used for the GTF/FASTA join.
-Numeric columns missing for a transcript are filled with 0; logical
-columns are filled with \code{FALSE}. Useful for adding \code{max_pct_id} or
-\verb{has_paralog_*} as additional context predictors for \code{\link[=fit_beinf]{fit_beinf()}}.}
+\item{paralog_table}{Optional paralog table (or path to a TSV with
+the same columns) produced by \code{\link[=make_paralog_table]{make_paralog_table()}}. Must have
+\code{transcript_id} and \code{has_paralog} (logical / 0-1). The
+\code{has_paralog} column is joined onto the per-read table by
+\code{transcript_id} (with a version-strip fallback for
+annotation-version mismatches); reads on transcripts not in the
+table inherit \code{has_paralog = FALSE}. This is the binary predictor
+consumed by \code{\link[=fit_beinf]{fit_beinf()}}.}
 }
 \value{
 A data.frame with one row per alignment containing

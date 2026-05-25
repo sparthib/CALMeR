@@ -4,10 +4,10 @@
 
 CALMeR filters BAM files from long-read transcriptome alignments by flagging
 reads whose MAPQ is anomalously low given transcript-level structural features
-(number of isoforms, transcript length, GC content, percent covered). It fits
-a Beta-Inflated regression model on a sampled subset of reads, computes
-randomized quantile residuals on the full BAM, and removes reads with low
-residuals.
+(number of isoforms, transcript length, GC content, percent covered, and
+cross-gene paralog presence). It fits a Beta-Inflated (BEINF) regression
+model on a sampled subset of reads, computes randomized quantile residuals
+on the full BAM, and removes reads with anomalously low residuals.
 
 ## Status
 
@@ -19,40 +19,42 @@ being ported from analysis scripts.
 Single-model workflow (one BEINF fit, one diagnostic report):
 
 ```r
-features <- extract_features(bam, gtf, fasta)
+paralog  <- make_paralog_table(fasta, gtf, paf_path = "self.paf")
+features <- extract_features(bam, gtf, fasta, paralog_table = paralog)
 clean    <- clean_features(features)
-fit      <- fit_beinf(clean, n = 50000, seed = 42, n_knots = 5)
+fit      <- fit_beinf(clean, n = 50000, seed = 42, inter = 5)
 scored   <- score_reads(clean, fit, filter_method = "mad", threshold = -3)
 filter_bam(bam, scored, out_bam = "filtered.bam", out_tsv = "flagged.tsv.gz")
-calmer_report(fit, scored, out_file = "report.html", format = "html")
+calmer_report(fit, features = clean,
+              out_file = "report.html", format = "html")
 ```
 
-Model-comparison workflow (fits a suite of default models, picks one
-to drive scoring):
+Model-comparison workflow (fits a suite of up to 12 default models, ranks
+them, picks the best, and drives the report and scoring against it):
 
 ```r
-features <- extract_features(bam, gtf, fasta, paralog_table = my_paralog_tsv)
+paralog  <- make_paralog_table(fasta, gtf, paf_path = "self.paf")
+features <- extract_features(bam, gtf, fasta, paralog_table = paralog)
 clean    <- clean_features(features)
 
-# Fits four defaults:
-#   pb_paralog        : pb() on canonical 4 + linear max_pct_id (hybrid)
-#   pb_no_paralog     : pb() on canonical 4
-#   linear_paralog    : linear on all 5
-#   linear_no_paralog : linear on canonical 4
-# A fifth "user" fit is added if `user_formula` is supplied.
-suite <- fit_beinf_suite(clean, n = 50000, seed = 42, n_knots = 5)
+# Fits up to 12 variants on the grid:
+#   {pb, linear} smoother for the scaled predictors
+#   x { none, + tx_length_sc:n_isoforms, + tx_length_sc:pct_covered_sc }
+#   x { with has_paralog, without }
+# Variant names follow `<smoother>_<paralog>[_<interaction>]`, e.g.
+# `pb_paralog_x_pcov` or `linear_no_paralog`. See ?fit_beinf_suite.
+suite <- fit_beinf_suite(clean, n = 50000, seed = 42, inter = 5)
 
-# Scoring + filtering use the suite's PRIMARY fit:
-#   - "user"          if user_formula was supplied,
-#   - "pb_paralog"    if max_pct_id is on `features`,
-#   - "pb_no_paralog" otherwise.
-scored <- score_reads(clean, suite, filter_method = "mad", threshold = -3)
+# calmer_report() ranks the suite by AIC + BIC + Nagelkerke pseudo-R^2,
+# picks the model with the smallest average rank, re-scores against the
+# picked model, and renders the diagnostic report. The picked model
+# name and the scored data are returned as attributes on the path.
+out    <- calmer_report(suite, features = clean,
+                        out_file = "report.html", format = "html")
+picked <- attr(out, "picked_model")
+scored <- attr(out, "scored")
+
 filter_bam(bam, scored, out_bam = "filtered.bam", out_tsv = "flagged.tsv.gz")
-
-# Report adds a model-comparison section (AIC / BIC / EDF / pseudo-R^2
-# table + side-by-side QQ panels). Per-model diagnostic sections run
-# on the primary fit.
-calmer_report(suite, scored, out_file = "report.html", format = "html")
 ```
 
 ## Installation

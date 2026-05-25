@@ -51,17 +51,14 @@ the cutpoint values.
 }
 \details{
 Quantile values and per-level proportions are returned invisibly so the
-user can paste them into \code{\link[=clean_features]{clean_features()}} (e.g. \code{gc_range},
-\code{tx_length_range}, \code{max_n_isoforms}).
+user can use them when picking \code{max_n_isoforms} or
+\code{pct_covered_winsor_bounds} for \code{\link[=clean_features]{clean_features()}}.
 
 Typical workflow:
 \preformatted{
   features <- extract_features(bam, gtf, fasta)
-  info     <- inspect_predictors(features)   # inspect raw, set bounds
-  clean    <- clean_features(features,
-                             gc_range        = c(35, 65),
-                             tx_length_range = c(200, 8000),
-                             max_n_isoforms  = 8)
+  info     <- inspect_predictors(features)   # inspect raw distributions
+  clean    <- clean_features(features, max_n_isoforms = 7)
   fit      <- fit_beinf(clean)
 }
 }

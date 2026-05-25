@@ -6,14 +6,14 @@
 \usage{
 fit_beinf_suite(
   features,
-  predictors_with_paralog = c("n_isoforms", "tx_length", "gc_content", "pct_covered",
-    "max_pct_id"),
-  predictors_no_paralog = c("n_isoforms", "tx_length", "gc_content", "pct_covered"),
+  scaled_predictors = c("tx_length", "gc_content", "pct_covered"),
+  piecewise_predictors = list(n_isoforms = 5),
+  linear_predictors = c("has_paralog"),
   user_formula = NULL,
   user_sigma_formula = NULL,
   user_nu_formula = NULL,
   user_tau_formula = NULL,
-  n_knots = 5,
+  inter = 5,
   n = 50000,
   seed = 42,
   min_paralog_in_sample = 100,
@@ -23,31 +23,29 @@ fit_beinf_suite(
 \arguments{
 \item{features}{Cleaned training data frame from \code{\link[=clean_features]{clean_features()}}.}
 
-\item{predictors_with_paralog}{Character vector of predictors for
-the \verb{*_paralog} variants. Default
-\code{c("n_isoforms", "tx_length", "gc_content", "pct_covered", "max_pct_id")}.}
-
-\item{predictors_no_paralog}{Character vector of predictors for
-the \verb{*_no_paralog} variants. Default
-\code{c("n_isoforms", "tx_length", "gc_content", "pct_covered")}.}
+\item{scaled_predictors, piecewise_predictors, linear_predictors}{Forwarded to \code{\link[=fit_beinf]{fit_beinf()}}; see its docstring for the exact
+semantics. Defaults match the canonical CALMeR pipeline
+(\code{tx_length}, \code{gc_content}, \code{pct_covered} scaled; \code{n_isoforms}
+piecewise at knot 5; \code{has_paralog} linear).}
 
 \item{user_formula, user_sigma_formula, user_nu_formula, user_tau_formula}{Optional gamlss formulas for an additional user-defined fit. If
 \code{user_formula} is \code{NULL}, no user fit is added. If non-\code{NULL}, the
 sigma/nu/tau formulas default to the same RHS as \code{user_formula}
 (via \code{\link[=fit_beinf]{fit_beinf()}}'s own defaulting).}
 
-\item{n_knots}{Integer passed to \code{pb(., inter = n_knots)} for the
-penalized-spline variants. Default 5.}
+\item{inter}{Integer; number of equal-spaced intervals for each
+penalized B-spline term in the \verb{pb_*} variants. Forwarded to the
+\code{inter} argument of \code{\link[gamlss:ps]{gamlss::pb()}}. Default 5.}
 
 \item{n, seed, trace}{Forwarded to \code{\link[=fit_beinf]{fit_beinf()}}.}
 
 \item{min_paralog_in_sample}{Integer floor. Before fitting the
-paralog variants, the function estimates the expected number of
-paralog reads (\code{max_pct_id > 0}) in the random training subset.
-If that estimate falls below \code{min_paralog_in_sample}, a warning is
-emitted (the variants are still fitted; the warning just flags
-that the paralog coefficient may be noisy or unidentified).
-Default 100. Set to 0 to disable.}
+\verb{*_paralog} variants, the function estimates the expected number
+of paralog reads (\code{has_paralog == TRUE}) in the random training
+subset. If that estimate falls below \code{min_paralog_in_sample}, a
+warning is emitted (the variants are still fitted; the warning
+just flags that the paralog coefficient may be noisy or
+unidentified). Default 100. Set to 0 to disable.}
 }
 \value{
 An object of class \code{"calmer_suite"}: a named list of
@@ -55,29 +53,38 @@ An object of class \code{"calmer_suite"}: a named list of
 name of the fit that downstream functions should use for scoring.
 }
 \description{
-Convenience wrapper that fits up to five BEINF models on the same
+Convenience wrapper that fits up to 12 BEINF models on the same
 training data and returns them as a single \code{calmer_suite} object.
-Useful for comparing flexible (penalized B-spline) vs. linear
-parametrisations, with and without paralog context.
+The grid crosses three axes:
+\describe{
+\item{Smoother for the scaled predictors}{\code{pb()} penalized
+B-spline vs plain linear.}
+\item{Interaction term}{none, \code{tx_length_sc:n_isoforms} (length by
+isoform count), or \code{tx_length_sc:pct_covered_sc} (length by
+coverage). All interactions are linear-by-linear cross terms
+on top of the marginal main effects; they test whether the
+interaction adds anything beyond the marginals.}
+\item{Paralog}{\code{linear_predictors} (default \code{has_paralog})
+included vs omitted.}
+}
+Across every variant, \code{piecewise_predictors} (default \code{n_isoforms}
+with a knot at 5) enters as the two-piece linear basis; it is not
+swapped for \code{pb()} because seven distinct values can't support a
+useful smooth (see \code{vignette} / \code{\link[=fit_beinf]{fit_beinf()}} docs).
 }
 \details{
-By default the suite contains four named fits:
-\describe{
-\item{\code{pb_paralog}}{\code{pb(., inter = n_knots)} on the four canonical
-features \strong{plus a linear term in \code{max_pct_id}}. The paralog
-predictor is intentionally not wrapped in \code{pb()} because
-\code{max_pct_id} is highly zero-inflated (most transcripts have
-no paralog), which destabilises spline fits. Fitted only if
-\code{max_pct_id} is present on \code{features}.}
-\item{\code{pb_no_paralog}}{\code{pb(., inter = n_knots)} on the four
-canonical features.}
-\item{\code{linear_paralog}}{Linear terms on all five predictors
-(including \code{max_pct_id}). Same paralog requirement.}
-\item{\code{linear_no_paralog}}{Linear terms on the four canonical
-features.}
+Variant names follow the pattern
+\verb{<smoother>_<paralog>[_<interaction>]}:
+\itemize{
+\item \code{pb_paralog}, \code{pb_paralog_x_niso}, \code{pb_paralog_x_pcov}
+\item \code{pb_no_paralog}, \code{pb_no_paralog_x_niso}, \code{pb_no_paralog_x_pcov}
+\item \code{linear_paralog}, \code{linear_paralog_x_niso}, \code{linear_paralog_x_pcov}
+\item \code{linear_no_paralog}, \code{linear_no_paralog_x_niso}, \code{linear_no_paralog_x_pcov}
 }
-If \code{user_formula} is non-\code{NULL}, a fifth fit named \code{"user"} is added
-using exactly the formulas supplied.
+where \verb{_x_niso} adds \code{tx_length_sc:n_isoforms} and \verb{_x_pcov} adds
+\code{tx_length_sc:pct_covered_sc}. Variants whose required predictors
+are absent from \code{features} (or from \code{scaled_predictors} /
+\code{piecewise_predictors}) are skipped with a message.
 
 Primary fit (the one used by \code{\link[=score_reads]{score_reads()}} and \code{\link[=filter_bam]{filter_bam()}}
 when the suite is passed in):
@@ -87,14 +94,15 @@ when the suite is passed in):
 \item otherwise \code{"pb_no_paralog"}.
 }
 
-Fitting four to five BEINF models is several times slower than
-fitting one. Plan accordingly when calling from an array job.
+Fitting a dozen BEINF models is several times slower than fitting
+one. Plan accordingly when calling from an array job.
 }
 \examples{
 \dontrun{
   ex       <- calmer_example_data()
+  paralog  <- make_paralog_table(ex$fasta, ex$gtf, paf_path = ex$paf)
   features <- extract_features(ex$bam, ex$gtf, ex$fasta,
-                               paralog_table = my_paralog_tsv)
+                               paralog_table = paralog)
   clean    <- clean_features(features)
   suite    <- fit_beinf_suite(clean, n = 5000)
   scored   <- score_reads(clean, suite)        # uses primary fit
