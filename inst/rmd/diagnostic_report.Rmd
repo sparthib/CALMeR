@@ -125,10 +125,10 @@ scoring summary.
 ```
 
 ```{asis, echo = !has_suite}
-Only a single fit was supplied to `calmer_report()`. The summary below
-reflects that fit's AIC, BIC, and Nagelkerke pseudo-R². To compare against
-alternative parameterisations, fit a `fit_beinf_suite()` and pass the suite
-to `calmer_report()`.
+The summary below reflects the picked model's AIC, BIC, and Nagelkerke
+pseudo-R². To compare the full model against the backward-selected
+Strategy A / B models, run `select_beinf()` and inspect its `$comparison`
+table.
 ```
 
 ```{r model_comparison_table}

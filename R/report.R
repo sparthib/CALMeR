@@ -4,28 +4,18 @@
 #' on the training data and (if a scored data set is available) summaries
 #' of where flags landed in the scored data set.
 #'
-#' When `fit` is a `calmer_suite` and `features` is supplied,
-#' `calmer_report()` picks the "best" model from the suite by ranking
-#' the fits on three metrics — **AIC**, **BIC**, and **Nagelkerke
-#' pseudo-R²** — and selecting the model with the smallest *average*
-#' rank. The picked model then drives all subsequent sections (residual
-#' diagnostics, partial effects, coefficient forest plot) and is also
-#' used to re-score the data via [score_reads()], so the flag stats in
-#' the report match the picked model. The pick and the full ranking
-#' table are reported up front.
+#' When `fit` is a `calmer_selection` from [select_beinf()], the model
+#' it already picked (minimum BIC among the full model and the
+#' backward-selected Strategy A / B models) drives all subsequent
+#' sections (residual diagnostics, partial effects, coefficient forest
+#' plot) and is used to re-score the data via [score_reads()], so the
+#' flag stats in the report match the picked model.
 #'
-#' When `fit` is a single `calmer_fit`, no ranking is done; the fit is
-#' used as supplied. When `fit` is a suite but no `features` is given,
-#' the report falls back to the suite's pre-set primary fit and the
-#' pre-computed `scored` argument (with a warning).
+#' When `fit` is a single `calmer_fit`, the fit is used as supplied.
 #'
 #' Sections:
 #' \enumerate{
 #'   \item Training summary (predictor distributions, MAPQ histogram).
-#'   \item Model comparison (only if a `calmer_suite` is supplied):
-#'         AIC / BIC / Nagelkerke pseudo-R² across all fits in the
-#'         suite, with ranks and the picked model highlighted. QQ
-#'         panels per variant.
 #'   \item Picked-model fit diagnostics (formulas, EDFs).
 #'   \item Residual diagnostics (global QQ + density vs N(0, 1), RQR
 #'         density faceted by each predictor's bins).
@@ -39,11 +29,10 @@
 #' }
 #'
 #' @param fit Either a single `calmer_fit` from [fit_beinf()] or a
-#'   `calmer_suite` from [fit_beinf_suite()].
+#'   `calmer_selection` from [select_beinf()].
 #' @param features Cleaned training data frame from [clean_features()].
-#'   Required if `fit` is a suite and you want the rank-pick + re-score
-#'   behaviour. If `NULL`, the report falls back to `scored` and the
-#'   suite's pre-set primary.
+#'   When supplied, the report re-scores against the picked fit. If
+#'   `NULL`, the report falls back to the pre-computed `scored` argument.
 #' @param scored Optional data frame returned by [score_reads()]. Used
 #'   only when `features` is `NULL` (legacy path). If both `features`
 #'   and `scored` are supplied, `features` wins and the report
@@ -56,8 +45,9 @@
 #'   `list(filter_method = "mad", threshold = -3)`).
 #'
 #' @return Invisibly, the absolute path to the rendered file, with
-#'   attributes `"picked_model"` (the name picked from the suite, if
-#'   any) and `"scored"` (the data frame the report rendered against).
+#'   attributes `"picked_model"` (the name of the picked model, if a
+#'   selection was supplied) and `"scored"` (the data frame the report
+#'   rendered against).
 #'
 #' @examples
 #' if (rmarkdown::pandoc_available()) {
@@ -87,8 +77,8 @@ calmer_report <- function(fit,
                           score_args  = list()) {
   format <- match.arg(format)
 
-  if (!inherits(fit, "calmer_fit") && !inherits(fit, "calmer_suite")) {
-    stop("`fit` must be a calmer_fit (or calmer_suite) object.")
+  if (!inherits(fit, "calmer_fit") && !inherits(fit, "calmer_selection")) {
+    stop("`fit` must be a calmer_fit (or calmer_selection) object.")
   }
   if (!is.null(features) && !is.data.frame(features)) {
     stop("`features` must be a data frame (typically from clean_features()).")
@@ -97,37 +87,21 @@ calmer_report <- function(fit,
     stop("`scored` must be a data frame returned by score_reads(), or NULL.")
   }
 
-  is_suite     <- inherits(fit, "calmer_suite")
+  is_selection <- inherits(fit, "calmer_selection")
   rank_table   <- NULL
   picked_name  <- NULL
   picked_fit   <- NULL
 
-  if (is_suite) {
-    rank_table <- .rank_suite(fit)
-    if (!is.null(features)) {
-      # Rank-pick path: choose the best model and re-score against it.
-      picked_name <- rank_table$Model[rank_table$picked][1]
-      if (is.na(picked_name)) {
-        warning("calmer_report: ranking produced no pick (all fits had NA metrics). ",
-                "Falling back to the suite's pre-set primary.", call. = FALSE)
-        picked_fit  <- primary_fit(fit)
-        picked_name <- attr(fit, "primary")
-      } else {
-        picked_fit  <- fit[[picked_name]]
-      }
+  if (is_selection) {
+    # select_beinf() already chose the model (min BIC among full / A / B);
+    # use its scorable picked fit. The full comparison lives in the
+    # selection object; the report renders the picked model's diagnostics.
+    picked_fit  <- primary_fit(fit)
+    picked_name <- fit$picked
+    if (!is.null(features) && is.null(scored)) {
       scored <- do.call(score_reads,
                         c(list(features = features, fit = picked_fit),
                           score_args))
-    } else {
-      # Legacy path: no features supplied, fall back to suite primary.
-      if (!is.null(scored)) {
-        warning("calmer_report: `features` not supplied; using the suite's ",
-                "pre-set primary and the pre-computed `scored`. Pass ",
-                "`features` to enable the rank-and-re-score flow.",
-                call. = FALSE)
-      }
-      picked_fit  <- primary_fit(fit)
-      picked_name <- attr(fit, "primary")
     }
   } else {
     # Single calmer_fit. No ranking; use as supplied.
@@ -159,7 +133,7 @@ calmer_report <- function(fit,
     output_format = output_format,
     output_file   = out_file,
     params        = list(fit         = picked_fit,
-                         suite       = if (is_suite) fit else NULL,
+                         suite       = NULL,
                          scored      = scored,
                          rank_table  = rank_table,
                          picked_name = picked_name,

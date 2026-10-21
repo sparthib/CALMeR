@@ -182,7 +182,10 @@ fit_beinf <- function(features,
     # Defaults for sigma/nu/tau mirror the user's mu formula RHS.
     rhs_for_others <- paste(deparse(formula[[3L]]), collapse = " ")
   }
-  if (is.null(sigma_formula)) sigma_formula <- stats::as.formula(paste("~", rhs_for_others))
+  # sigma (interior Beta dispersion) is held constant by default: the
+  # manuscript models only mu, nu, tau with covariate linear predictors.
+  # A user may still pass an explicit sigma_formula to override this.
+  if (is.null(sigma_formula)) sigma_formula <- stats::as.formula("~ 1")
   if (is.null(nu_formula))    nu_formula    <- stats::as.formula(paste("~", rhs_for_others))
   if (is.null(tau_formula))   tau_formula   <- stats::as.formula(paste("~", rhs_for_others))
 
@@ -217,7 +220,7 @@ fit_beinf <- function(features,
 }
 
 # Internal: build a `pb()` + piecewise + linear RHS string from the
-# three predictor specs. Shared by fit_beinf() and fit_beinf_suite().
+# three predictor specs. Shared by fit_beinf() and select_beinf().
 .build_three_class_rhs <- function(scaled_predictors,
                                    piecewise_predictors,
                                    linear_predictors,

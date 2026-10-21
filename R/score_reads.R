@@ -7,7 +7,7 @@
 #'
 #' Preprocessing must be consistent between training and scoring data.
 #' The expected pattern is: clean the training data with
-#' [clean_features()], fit with [fit_beinf()] or [fit_beinf_suite()],
+#' [clean_features()], fit with [fit_beinf()] or [select_beinf()],
 #' then clean the scoring data with the **same** transforms — including
 #' the training winsorize bounds stored on the fit
 #' (`fit$winsor_bounds`):
@@ -41,9 +41,9 @@
 #'   \item **MAPQ = 0** (lower point mass) — flag if the model is
 #'         surprised by the zero, i.e. if the binomial deviance for
 #'         "is the read at the zero mass?" is large:
-#'         `dev_zero = sqrt(-2 log p_hat_0) > dev_threshold`.
-#'         Equivalently, flag if
-#'         `p_hat_0 < exp(-dev_threshold^2 / 2)`.
+#'         `dev_zero = sqrt(-2 log p_hat_0) > median(dev_zero) +
+#'         dev_threshold * mad(dev_zero)`, an upper-tail MAD rule on the
+#'         zero-mass deviance distribution (default `dev_threshold = 2`).
 #'         This catches well-covered, single-isoform, no-paralog reads
 #'         that landed at MAPQ = 0 despite the model predicting a tiny
 #'         probability of zero-mass outcome.
@@ -63,20 +63,20 @@
 #'   predictors used by the fit, transformed the same way as the
 #'   training data.
 #' @param fit Either a single `calmer_fit` returned by [fit_beinf()],
-#'   or a `calmer_suite` returned by [fit_beinf_suite()]. If a suite is
-#'   supplied, the suite's primary fit is used.
+#'   or a `calmer_selection` returned by [select_beinf()]. If a
+#'   selection is supplied, its picked (scorable) fit is used.
 #' @param filter_method One of `"mad"` (default) or `"zscore"`. Controls
 #'   the RQR-tail rule for continuous-MAPQ reads.
 #'   For `"mad"`: flag if `rqr < median(rqr) + threshold * mad(rqr)`,
 #'   computed on the continuous-MAPQ subset only.
 #'   For `"zscore"`: flag if `(rqr - mean(rqr)) / sd(rqr) < threshold`.
-#' @param threshold Numeric scalar for the RQR rule; default `-3`.
-#' @param dev_threshold Numeric scalar for the MAPQ = 0 deviance rule;
-#'   default `3` (mirrors `abs(threshold)`). Flag MAPQ = 0 reads when
-#'   `sqrt(-2 log p_hat_0) > dev_threshold`, i.e. when the model gave
-#'   them less than `exp(-dev_threshold^2 / 2)` probability of being
-#'   at the zero mass. With `dev_threshold = 3` that probability cutoff
-#'   is ~ 0.011.
+#' @param threshold Numeric scalar for the RQR rule; default `-2`
+#'   (flag interior reads with `rqr < median(rqr) - 2 * mad(rqr)`).
+#' @param dev_threshold Numeric MAD multiplier for the MAPQ = 0 deviance
+#'   rule; default `2` (mirrors `abs(threshold)`). Flag MAPQ = 0 reads in
+#'   the upper tail of the zero-mass deviance distribution, i.e. when
+#'   `dev_zero > median(dev_zero) + dev_threshold * mad(dev_zero)`. Larger
+#'   `dev_threshold` flags fewer reads.
 #' @param seed Random seed for the uniform draws on point masses.
 #' @param primary_only Logical; if `TRUE` (default) score only primary
 #'   alignments. Secondary alignments inherit `flag_low = FALSE`.
@@ -100,7 +100,7 @@
 #'   sigma_formula = ~ 1, nu_formula = ~ 1, tau_formula = ~ 1
 #' )
 #' scored <- score_reads(clean, fit,
-#'                       filter_method = "mad", threshold = -3)
+#'                       filter_method = "mad", threshold = -2)
 #' table(scored$flag_low)
 #'
 #' @importFrom stats predict median mad sd complete.cases runif qnorm
@@ -108,8 +108,8 @@
 score_reads <- function(features,
                         fit,
                         filter_method = c("mad", "zscore"),
-                        threshold     = -3,
-                        dev_threshold = 3,
+                        threshold     = -2,
+                        dev_threshold = 2,
                         seed          = 42,
                         primary_only  = TRUE) {
   filter_method <- match.arg(filter_method)
@@ -118,7 +118,7 @@ score_reads <- function(features,
 
   fit <- primary_fit(fit)
   if (!inherits(fit, "calmer_fit")) {
-    stop("`fit` must be a calmer_fit (or calmer_suite) object.")
+    stop("`fit` must be a calmer_fit (or calmer_selection) object.")
   }
   stopifnot(
     is.data.frame(features),
@@ -138,6 +138,13 @@ score_reads <- function(features,
   for (p in scaled_predictors) {
     features[[paste0(p, "_sc")]] <- apply_scale(features[[p]],
                                                 scale_params[[p]])
+  }
+  # Materialize the two-piece basis columns (<p>_hi = pmax(<p> - knot, 0)).
+  # select_beinf() fits reference these as explicit terms; harmless for
+  # fit_beinf() fits, which build the basis via I(pmax(...)) in-formula.
+  for (p in names(piecewise_predictors)) {
+    knot <- piecewise_predictors[[p]]
+    features[[paste0(p, "_hi")]] <- pmax(features[[p]] - knot, 0)
   }
   features$y <- features$MAPQ / 60
 
@@ -186,10 +193,12 @@ score_reads <- function(features,
   }
 
   # newdata for predict.gamlss: needs every column referenced in the
-  # model formula. pb(<x>_sc) wants <x>_sc; bare piecewise/linear
-  # terms (and the I(pmax(...)) basis) want the raw predictor names.
+  # model formula. pb(<x>_sc) wants <x>_sc; bare piecewise/linear terms
+  # (and the I(pmax(...)) basis) want the raw predictor names; select_beinf()
+  # fits additionally reference the materialized two-piece basis <p>_hi.
   scaled_sc    <- paste0(scaled_predictors, "_sc")
-  newdata_cols <- unique(c(all_predictors, scaled_sc, "y"))
+  piecewise_hi <- paste0(names(piecewise_predictors), "_hi")
+  newdata_cols <- unique(c(all_predictors, scaled_sc, piecewise_hi, "y"))
   newdata      <- features[scorable, newdata_cols, drop = FALSE]
 
   mu_p    <- stats::predict(fit$fit, newdata = newdata, what = "mu",
@@ -247,7 +256,23 @@ score_reads <- function(features,
   }
 
   flag_rqr <- !is.na(flag_thresh) & in_continuous & rqr < flag_thresh
-  flag_p0  <- at_zero & !is.na(dev_zero) & dev_zero > dev_threshold
+
+  # Zero-mass (MAPQ = 0) deviance threshold: computed on the zero-mass
+  # deviance distribution with the same MAD logic as the RQR rule, but
+  # in the UPPER tail (large dev_zero = model gave the read little chance
+  # of sitting at the zero mass). dev_threshold is the MAD multiplier
+  # (default +2), giving median(dev) + dev_threshold * mad(dev).
+  dev_obs <- dev_zero[at_zero & !is.na(dev_zero)]
+  if (length(dev_obs) > 0L) {
+    dev_thresh <- if (filter_method == "mad") {
+      stats::median(dev_obs) + dev_threshold * stats::mad(dev_obs)
+    } else {
+      dev_threshold * stats::sd(dev_obs) + mean(dev_obs)
+    }
+  } else {
+    dev_thresh <- NA_real_
+  }
+  flag_p0 <- at_zero & !is.na(dev_zero) & !is.na(dev_thresh) & dev_zero > dev_thresh
   # MAPQ = 60 (y == 1) is never flagged: the read achieved the maximum
   # possible MAPQ and so cannot be "unusually low" given any context.
 
@@ -262,6 +287,6 @@ score_reads <- function(features,
   attr(features, "filter_method")      <- filter_method
   attr(features, "threshold")          <- threshold
   attr(features, "dev_threshold")      <- dev_threshold
-  attr(features, "p0_threshold")       <- exp(-dev_threshold^2 / 2)
+  attr(features, "dev_flag_threshold") <- dev_thresh
   features
 }
