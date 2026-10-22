@@ -196,9 +196,15 @@ score_reads <- function(features,
   # model formula. pb(<x>_sc) wants <x>_sc; bare piecewise/linear terms
   # (and the I(pmax(...)) basis) want the raw predictor names; select_beinf()
   # fits additionally reference the materialized two-piece basis <p>_hi.
+  # predict.gamlss matches newdata names against the fit's training `data`,
+  # so newdata must NOT carry a column the training data lacks (otherwise
+  # "undefined columns selected"). Restrict to columns the fit actually has:
+  # select_beinf() fits carry <p>_hi, fit_beinf() fits encode it inline and
+  # do not -- the intersection keeps the right set for either fit type.
   scaled_sc    <- paste0(scaled_predictors, "_sc")
   piecewise_hi <- paste0(names(piecewise_predictors), "_hi")
-  newdata_cols <- unique(c(all_predictors, scaled_sc, piecewise_hi, "y"))
+  cand_cols    <- unique(c(all_predictors, scaled_sc, piecewise_hi, "y"))
+  newdata_cols <- intersect(cand_cols, names(fit$training_data))
   newdata      <- features[scorable, newdata_cols, drop = FALSE]
 
   mu_p    <- stats::predict(fit$fit, newdata = newdata, what = "mu",
