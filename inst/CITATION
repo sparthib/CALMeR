@@ -1,0 +1,12 @@
+citHeader("To cite CALMeR in publications, use:")
+
+bibentry(
+  bibtype = "Article",
+  title   = "Transcript quantification using context-aware MAPQ modeling",
+  author  = c(person("Sowmya", "Parthiban"),
+              person("Stephanie C.", "Hicks")),
+  journal = "bioRxiv",
+  year    = "2026",
+  doi     = "10.64898/2026.10.26.761703",
+  url     = "https://doi.org/10.64898/2026.10.26.761703"
+)

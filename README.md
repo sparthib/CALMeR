@@ -9,12 +9,6 @@ cross-gene paralog presence). It fits a Beta-Inflated (BEINF) regression
 model on a sampled subset of reads, computes randomized quantile residuals
 on the full BAM, and removes reads with anomalously low residuals.
 
-## Status
-
-Core pipeline implemented: feature extraction, feature cleaning, BEINF
-model fitting, backward GAMLSS model selection, read scoring/flagging,
-BAM filtering, per-transcript quantification, and a diagnostic report.
-
 ## Workflow
 
 Single-model workflow (one BEINF fit, one diagnostic report):
@@ -70,8 +64,35 @@ counts <- quantify_counts(scored)
 
 ## Installation
 
+CALMeR has Bioconductor dependencies, so install it with `BiocManager`,
+which resolves both the Bioconductor and CRAN dependencies:
+
 ```r
-# devtools::install_github("sparthib/CALMeR")
+if (!requireNamespace("BiocManager", quietly = TRUE))
+  install.packages("BiocManager")
+BiocManager::install("sparthib/CALMeR")
 ```
 
-(Not yet installable — package is in scaffolding.)
+`make_paralog_table()` additionally requires `minimap2` (>= 2.24) on the
+`PATH` (only when no precomputed PAF or paralog table is supplied), and
+rendering the HTML/PDF diagnostic report requires `pandoc` (bundled with
+RStudio, or installed separately).
+
+## Citation
+
+If you use CALMeR, please cite:
+
+> Parthiban S, Hicks SC. Transcript quantification using context-aware
+> MAPQ modeling. *bioRxiv* 2026.10.26.761703 (2026).
+> doi:[10.64898/2026.10.26.761703](https://doi.org/10.64898/2026.10.26.761703)
+
+```bibtex
+@article{Parthiban2026CALMeR,
+  title   = {Transcript quantification using context-aware MAPQ modeling},
+  author  = {Parthiban, Sowmya and Hicks, Stephanie C.},
+  journal = {bioRxiv},
+  year    = {2026},
+  doi     = {10.64898/2026.10.26.761703},
+  url     = {https://doi.org/10.64898/2026.10.26.761703}
+}
+```
